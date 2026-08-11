@@ -238,6 +238,9 @@ const MANAGED_HOOK_COMMAND_BASENAMES_BY_SURFACE: Record<string, Set<string>> = {
     'gsd-context-monitor.js',
     // #772: Windows .cmd shim for gsd-context-monitor — same #3426 pattern.
     'gsd-context-monitor.cmd',
+    // Codex-native phase preflight guard and its Windows .cmd shim.
+    'gsd-codex-phase-dispatch-guard.js',
+    'gsd-codex-phase-dispatch-guard.cmd',
   ]),
 };
 

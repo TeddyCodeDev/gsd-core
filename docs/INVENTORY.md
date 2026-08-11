@@ -524,6 +524,7 @@ Full listing: `gsd-core/bin/lib/*.cjs`.
 | `phase-id.cjs` | Pure phase-id parsing/matching helpers — normalize, token match, milestone/phase-dir id parsing, phase-markdown regex builders (extracted from `core.cjs`, ADR-857) |
 | `phase-lifecycle.cjs` | Pure-computation phase lifecycle helpers extracted from the phase-lifecycle SDK handler |
 | `phase-locator.cjs` | Phase-directory search/location — active + archived phase-dir discovery, phase-id matching against the filesystem (extracted from `core.cjs`, ADR-857) |
+| `phase-preflight.cjs` | Phase conflict preflight — finds sibling worktrees and open GitHub pull requests whose branches match a target phase; returns an explicit safe/conflict/unresolved verdict for dispatch guards and workflows |
 | `phase.cjs` | Phase directory operations, decimal numbering, plan indexing |
 | `phases-command-router.cjs` | Thin CJS subcommand router adapter for `gsd-tools phases` |
 | `plan-dependency-graph.cjs` | Shared halt-propagation over a plan's `depends_on` DAG — the single topological-order + halt-propagation engine used by both `phase.cjs`'s wave-grouping and `phase-locator.cjs`'s phase-location primitive, so the two can never diverge on which plans a halted plan blocks (#2830) |
@@ -620,6 +621,8 @@ Full listing: `hooks/`.
 | `gsd-read-injection-scanner.js` | `PostToolUse` | Scans tool Read results for prompt-injection patterns (v1.36+, PR #2201) |
 | `gsd-worktree-path-guard.js` | `PreToolUse` | Hard-blocks Edit/Write/MultiEdit with absolute paths outside the worktree root (PR #579, #260) |
 | `gsd-agent-isolation-guard.js` | `PreToolUse` | Hard-blocks an executor `Agent()` dispatch missing its harness isolation parameter when the project's resolved dispatch isolation is `harness-worktree` (#3045) |
+| `gsd-phase-dispatch-guard.js` | Claude Code `PreToolUse` | Hard-blocks an executor `Agent`/`Task` dispatch only when phase preflight finds sibling-worktree or open-PR evidence of existing phase work; check errors fail open |
+| `gsd-codex-phase-dispatch-guard.js` | Codex `PreToolUse` (`spawn_agent`) | Codex-native companion: checks `agent_type` and task `message`, then blocks only positive phase-preflight conflicts; environment and check errors fail open |
 | `gsd-write-guard.js` | `PreToolUse` | Hard-blocks a whole-file `Write` that catastrophically shrinks a curated `.planning/` artifact (ROADMAP.md, milestone roadmaps, STATE.md); override via the single-use sentinel `.planning/.gsd-allow-shrink` (workflow steps) or `GSD_ALLOW_PLANNING_SHRINK=1` (interactive) (#2255, fix 3 of #973) |
 | `gsd-config-reload.js` | `FileChanged` | Hot-reloads GSD config context when `.planning/config.json` changes mid-session (#770) |
 | `gsd-ensure-canonical-path.js` | `SessionStart` | Symlinks `~/.claude/gsd-core/{bin,contexts,references,templates,workflows}` to the plugin's bundled tree so `@~/.claude/gsd-core/...` includes resolve in marketplace plugin installs; no-op in classic installs, self-heals after `claude plugin update` (#997) |

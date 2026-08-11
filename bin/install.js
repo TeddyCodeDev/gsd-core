@@ -1274,6 +1274,11 @@ function ensureCodexHooksJsonEvent(targetDir, eventName, opts = {}) {
   return hooksSurface.ensureCodexHooksJsonEvent(targetDir, eventName, opts);
 }
 
+/** Register a named script through Codex's hooks.json surface. */
+function ensureCodexHooksJsonScriptEvent(targetDir, eventName, scriptName, opts = {}) {
+  return hooksSurface.ensureCodexHooksJsonScriptEvent(targetDir, eventName, scriptName, opts);
+}
+
 /**
  * Remove a GSD-managed event entry from hooks.json. Called during uninstall.
  *
@@ -11932,6 +11937,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
       'gsd-check-update-worker.js',
       'managed-hooks-registry.cjs',
       'gsd-context-monitor.js',
+      'gsd-codex-phase-dispatch-guard.js',
     ];
     const codexHooksSrc = path.join(src, 'hooks', 'dist');
     if (fs.existsSync(codexHooksSrc)) {
@@ -12121,6 +12127,27 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
           }
         } else if (!codexNodeRunner) {
           console.warn(`  ${yellow}⚠${reset}  Skipped Codex extended hook-event registration — Node runner unavailable.`);
+        }
+
+        // Codex's native dispatch is `spawn_agent` with `{ agent_type, message
+        // }`, not Claude's Agent/Task `{ subagent_type, description }` shape.
+        // Register the matching guard separately so a positive preflight
+        // conflict blocks before the executor is created.
+        const phaseDispatchGuardFile = path.join(targetDir, 'hooks', 'gsd-codex-phase-dispatch-guard.js');
+        if (codexNodeRunner && fs.existsSync(phaseDispatchGuardFile)) {
+          const guardWrite = ensureCodexHooksJsonScriptEvent(targetDir, 'PreToolUse', 'gsd-codex-phase-dispatch-guard.js', {
+            absoluteRunner: codexNodeRunner,
+            platform: process.platform,
+            matcher: '^spawn_agent$',
+            timeout: 8,
+          });
+          if (guardWrite.wrote) {
+            console.log(`  ${green}✓${reset} Configured Codex phase dispatch guard (PreToolUse via hooks.json)`);
+          } else if (guardWrite.changed) {
+            console.log(`  ${green}✓${reset} Verified Codex phase dispatch guard (PreToolUse via hooks.json)`);
+          }
+        } else if (!codexNodeRunner) {
+          console.warn(`  ${yellow}⚠${reset}  Skipped Codex phase dispatch guard registration — Node runner unavailable.`);
         }
         // ── end Codex extended hook events ────────────────────────────────────
       }
@@ -13795,6 +13822,7 @@ module.exports = {
     rewriteLegacyCodexHookBlock,
     buildCodexHookWindowsShimIR,
     ensureCodexHooksJsonSessionStart,
+    ensureCodexHooksJsonScriptEvent,
     ensureCodexHooksJsonEvent,
     removeCodexHooksJsonEvent,
     reconcileCodexHooksJsonEvent,

@@ -64,6 +64,8 @@ const HOOKS_TO_COPY = [
   // gsd-core/bin/lib/phase-preflight.cjs module at runtime — ships as part of the
   // full gsd-core/ tree, not via this list.
   'gsd-phase-dispatch-guard.js',
+  // Codex-native companion for the `spawn_agent` PreToolUse surface.
+  'gsd-codex-phase-dispatch-guard.js',
   'gsd-prompt-guard.js',
   'gsd-read-guard.js',
   'gsd-read-injection-scanner.js',

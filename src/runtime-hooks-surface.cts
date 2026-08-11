@@ -646,6 +646,8 @@ interface ReconcileCodexOpts {
   commandWindows?: string | null;
   matcher?: string | null;
   timeout?: number | null;
+  /** Limit replacement to these GSD basenames when an event owns multiple hooks. */
+  managedHookNames?: string[];
 }
 
 interface ReconcileResult {
@@ -660,6 +662,7 @@ function reconcileCodexHooksJsonEvent(targetDir: string, eventName: string, opts
   const commandWindows = typeof opts.commandWindows === 'string' ? opts.commandWindows : null;
   const matcher = typeof opts.matcher === 'string' ? opts.matcher : undefined;
   const timeout = typeof opts.timeout === 'number' ? opts.timeout : undefined;
+  const managedHookNames = Array.isArray(opts.managedHookNames) ? new Set(opts.managedHookNames) : null;
   let parsed: Record<string, unknown> = {};
   let currentContent: string | null = null;
   if (fs.existsSync(hooksJsonPath)) {
@@ -713,7 +716,8 @@ function reconcileCodexHooksJsonEvent(targetDir: string, eventName: string, opts
         surface: 'codex-hooks-json',
         includeLegacyAliases: true,
         configDir: targetDir,
-      });
+      }) && (managedHookNames === null ||
+        (typeof cmd === 'string' && [...managedHookNames].some((name) => cmd.includes(name))));
       if (managed) removedLegacy = true;
       return !managed;
     });
@@ -856,21 +860,33 @@ function ensureCodexHooksJsonSessionStart(targetDir: string, opts: EnsureCodexSe
 }
 
 // ---------------------------------------------------------------------------
-// ensureCodexHooksJsonEvent
+// ensureCodexHooksJsonScriptEvent
 // ---------------------------------------------------------------------------
 
-interface EnsureCodexEventOpts {
+interface EnsureCodexScriptEventOpts {
   absoluteRunner?: string | null;
   platform?: NodeJS.Platform;
+  matcher?: string | null;
+  timeout?: number | null;
 }
 
-function ensureCodexHooksJsonEvent(targetDir: string, eventName: string, opts: EnsureCodexEventOpts = {}): ReconcileResult {
+/**
+ * Registers a named hook script through Codex's hooks.json surface. Keeping
+ * command projection and Windows shim generation in this shared helper makes
+ * every Codex guard follow the same install/reinstall semantics.
+ */
+function ensureCodexHooksJsonScriptEvent(
+  targetDir: string,
+  eventName: string,
+  scriptName: string,
+  opts: EnsureCodexScriptEventOpts = {},
+): ReconcileResult {
   const platform = opts.platform || process.platform;
   const absoluteRunner = opts.absoluteRunner || null;
   const hooksJsonPath = path.join(targetDir, 'hooks.json');
   if (!absoluteRunner) return { changed: false, wrote: false, path: hooksJsonPath };
 
-  const scriptPath = shellCmdProjection.posixNormalize(path.resolve(targetDir, 'hooks', 'gsd-context-monitor.js'));
+  const scriptPath = shellCmdProjection.posixNormalize(path.resolve(targetDir, 'hooks', scriptName));
 
   let managedCommand: string | undefined;
   if (platform === 'win32') {
@@ -881,7 +897,7 @@ function ensureCodexHooksJsonEvent(targetDir: string, eventName: string, opts: E
     } catch (shimWriteErr) {
       const reason = shimWriteErr && (shimWriteErr as Error).message ? (shimWriteErr as Error).message : String(shimWriteErr);
       console.warn(
-        `  ${yellow}⚠${reset}  Codex Windows hook NOT installed — .cmd shim write failed for ${eventName}: ${reason}. ` +
+        `  ${yellow}⚠${reset}  Codex Windows hook NOT installed — .cmd shim write failed for ${scriptName}: ${reason}. ` +
           `Fix the write error (permissions? disk full?) and re-run the installer.`,
       );
       return { changed: false, wrote: false, path: hooksJsonPath };
@@ -897,7 +913,19 @@ function ensureCodexHooksJsonEvent(targetDir: string, eventName: string, opts: E
   }
 
   if (!managedCommand) return { changed: false, wrote: false, path: hooksJsonPath };
-  return reconcileCodexHooksJsonEvent(targetDir, eventName, { managedCommand, timeout: 10 });
+  return reconcileCodexHooksJsonEvent(targetDir, eventName, {
+    managedCommand,
+    matcher: opts.matcher,
+    timeout: opts.timeout,
+    managedHookNames: [scriptName, scriptName.replace(/\.js$/, '.cmd')],
+  });
+}
+
+function ensureCodexHooksJsonEvent(targetDir: string, eventName: string, opts: EnsureCodexScriptEventOpts = {}): ReconcileResult {
+  return ensureCodexHooksJsonScriptEvent(targetDir, eventName, 'gsd-context-monitor.js', {
+    ...opts,
+    timeout: opts.timeout ?? 10,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2537,6 +2565,7 @@ export = {
   reconcileCodexHooksJsonEvent,
   reconcileCodexHooksJsonSessionStart,
   ensureCodexHooksJsonSessionStart,
+  ensureCodexHooksJsonScriptEvent,
   ensureCodexHooksJsonEvent,
   removeCodexHooksJsonEvent,
   removeCodexHooksJsonSessionStart,

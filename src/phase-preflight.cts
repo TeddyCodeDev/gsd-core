@@ -17,7 +17,8 @@
  * to do with the verdict.
  */
 
-import * as path from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { execGit as execGitSeam, execTool as execToolSeam } from './shell-command-projection.cjs';
 
 type ExecGitFn = typeof execGitSeam;
@@ -91,12 +92,12 @@ export function normalizePhaseNumber(raw: string): string {
 export function resolveCurrentPhaseFromState(cwd: string, deps: PhasePreflightDeps = {}): string | null {
   const readFile = deps.readFile ?? ((p: string) => {
     try {
-      return require('node:fs').readFileSync(p, 'utf8');
+      return readFileSync(p, 'utf8');
     } catch {
       return null;
     }
   });
-  const content = readFile(path.join(cwd, '.planning', 'STATE.md'));
+  const content = readFile(join(cwd, '.planning', 'STATE.md'));
   if (!content) return null;
   const match = content.match(/^current_phase:\s*"?([0-9]+(?:\.[0-9]+)?)"?\s*$/m);
   return match ? match[1] : null;
@@ -223,14 +224,16 @@ export function findMatchingPullRequests(cwd: string, phaseNumber: string, deps:
     return { matches: [], skipped: true, skipReason: 'gh_output_unparseable' };
   }
 
+  const asString = (value: unknown): string => typeof value === 'string' ? value : '';
+  const asNumber = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) ? value : 0;
   const matches = (parsed as Array<Record<string, unknown>>)
-    .filter((pr) => matchesPhaseBranch(String(pr.headRefName ?? ''), phaseNumber))
+    .filter((pr) => matchesPhaseBranch(asString(pr.headRefName), phaseNumber))
     .map((pr) => ({
-      number: Number(pr.number),
-      headRefName: String(pr.headRefName ?? ''),
-      title: String(pr.title ?? ''),
-      url: String(pr.url ?? ''),
-      updatedAt: String(pr.updatedAt ?? ''),
+      number: asNumber(pr.number),
+      headRefName: asString(pr.headRefName),
+      title: asString(pr.title),
+      url: asString(pr.url),
+      updatedAt: asString(pr.updatedAt),
     }));
 
   return { matches, skipped: false, skipReason: null };
