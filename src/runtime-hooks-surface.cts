@@ -1987,6 +1987,37 @@ function applySettingsJsonHooks(settings: any, opts: ApplySettingsJsonHooksOpts)
       console.warn(`  ${yellow}⚠${reset}  Skipped agent isolation guard hook — gsd-agent-isolation-guard.js not found at target`);
     }
 
+    // Configure PreToolUse hook for phase-preflight dispatch guarding.
+    // Hard-blocks an executor Agent()/Task() dispatch (subagent_type ===
+    // "gsd-executor") when phase-preflight finds positive evidence the target
+    // phase already has work elsewhere (a sibling worktree, an open PR) — the
+    // tooling-layer backstop for `execute-phase.md`'s `phase_preflight_check`
+    // step, whose "STOP before dispatching" instruction is prose a model can
+    // skip or ignore. Fails open on any check error or unresolvable evidence;
+    // see gsd-phase-dispatch-guard.js's own header for the full design note.
+    const phaseDispatchGuardCommand = isGlobal
+      ? buildHookCommand(targetDir, 'gsd-phase-dispatch-guard.js', hookOpts)
+      : localCmd('gsd-phase-dispatch-guard.js');
+    const hasPhaseDispatchGuardHook = settings.hooks[preToolEvent].some((entry: HookGroup) =>
+      entry.hooks && entry.hooks.some((h: HookEntry) => referencesHook(h as Record<string, unknown>, 'gsd-phase-dispatch-guard'))
+    );
+    const phaseDispatchGuardFile = path.join(targetDir, 'hooks', 'gsd-phase-dispatch-guard.js');
+    if (!hasPhaseDispatchGuardHook && fs.existsSync(phaseDispatchGuardFile) && phaseDispatchGuardCommand) {
+      settings.hooks[preToolEvent].push({
+        matcher: 'Agent|Task',
+        hooks: [
+          {
+            type: 'command',
+            command: phaseDispatchGuardCommand,
+            timeout: 8
+          }
+        ]
+      });
+      console.log(`  ${green}✓${reset} Configured phase dispatch guard hook`);
+    } else if (!hasPhaseDispatchGuardHook && !fs.existsSync(phaseDispatchGuardFile)) {
+      console.warn(`  ${yellow}⚠${reset}  Skipped phase dispatch guard hook — gsd-phase-dispatch-guard.js not found at target`);
+    }
+
     // Configure PreToolUse hook for catastrophic-shrink protection (#2255, fix 3 of #973)
     // Hard-blocks a whole-file Write that collapses a curated .planning/ artifact
     // (ROADMAP.md, milestone roadmaps, STATE.md) far below its on-disk size.

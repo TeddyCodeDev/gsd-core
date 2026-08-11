@@ -58,6 +58,15 @@ const MODULE_OWNED_HOOKS = new Set([
   // via install.js's classic-installer settings.json path — the plugin
   // install mode never runs bin/install.js at all.
   'gsd-ensure-canonical-path.js',
+  // gsd-codex-phase-dispatch-guard.js is Codex's native companion to
+  // gsd-phase-dispatch-guard.js — registered via
+  // ensureCodexHooksJsonScriptEvent(targetDir, 'PreToolUse',
+  // 'gsd-codex-phase-dispatch-guard.js', ...) against Codex's own hooks.json
+  // surface (matcher '^spawn_agent$'), never a settings.json
+  // buildHookCommand(..., '<hook-name>', ...) call this source-scan matches —
+  // Codex has no settings.json hooks surface at all. Validated behaviorally
+  // by tests/gsd-codex-phase-dispatch-guard.test.cjs.
+  'gsd-codex-phase-dispatch-guard.js',
 ]);
 
 // ADR-857 phase 5f-1b: settings-json hook registration moved to runtime-hooks-surface.cts.

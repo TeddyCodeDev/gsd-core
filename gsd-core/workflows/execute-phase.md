@@ -195,41 +195,11 @@ Offer these recovery options:
 </step>
 
 <step name="phase_preflight_check">
-`safe_resume_gate` above only sees this checkout's own git history — it cannot detect
-phase work already in progress on a *different* worktree or an open PR, which
-`STATE.md`/`ROADMAP.md` in this checkout have no way to know about either. Run the
-portable preflight check before dispatching any executor:
+Surfaces phase conflicts before dispatch — the guard hook blocks a match either way:
 
 ```bash
-PREFLIGHT=$(gsd_run query worktree phase-preflight "${PHASE_NUMBER}")
-PREFLIGHT_VERDICT=$(printf '%s' "$PREFLIGHT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{process.stdout.write(JSON.parse(d).verdict||'')}catch{}})" 2>/dev/null)
+gsd_run query worktree phase-preflight "${PHASE_NUMBER}"
 ```
-
-**If `PREFLIGHT_VERDICT` is `existing_work_found`:** STOP. Do not dispatch any executor.
-Parse `PREFLIGHT`'s `matchingWorktrees` and `matchingPullRequests` arrays and present them
-to the user:
-
-```
-⚠ Phase {PHASE_NUMBER} already has work elsewhere:
-  {for each matchingWorktrees entry: "  worktree: {path} [{branch}]"}
-  {for each matchingPullRequests entry: "  PR #{number}: {title} ({url}, updated {updatedAt})"}
-
-Enter that worktree (or inspect the PR) instead of dispatching a fresh executor here —
-re-executing this phase would duplicate work already done, possibly by a different
-session. If you're certain this checkout should proceed anyway (e.g. the other work is
-abandoned), remove or merge it first, then re-run this command.
-```
-
-Claude Code sessions: additionally check for other active sessions on this project (e.g.
-via a peer-session listing tool, when available) and mention any found — they're the most
-likely source of in-progress work the worktree/PR check might not catch yet (not yet
-pushed). Treat this as a bonus signal only; the worktree/PR check above is authoritative
-and this step must not block on a tool that isn't available in the current runtime.
-
-**If `PREFLIGHT_VERDICT` is `safe_to_create` or the check could not resolve a phase
-number:** proceed normally. A missing verdict (e.g. `gh` unavailable and no local
-worktree match) degrades to "proceed" — this check is a warning system, not a hard
-dependency; it must never block a legitimate run because of an environment gap.
 </step>
 
 **MVP+TDD gate.** Task-scoped enforcement runs inside plan execution (immediately before each implementation step), where `TASK_FILE`, `PLAN_ID`, and `TASK_ID` are defined. Keep the same predicate and RED-commit contract:

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "paths": {
+    "manager.md": {
+      "reason": "Same phase-preflight check applied at the manager workflow's recommendation-building step: before offering `execute`/`plan` actions for a phase, each candidate phase is checked via `gsd_run query worktree phase-preflight`; a phase with existing work elsewhere is pulled from the Continue bundle and surfaced as its own warning line instead of silently offered for re-dispatch. `.planning/STATE.md` in this checkout has no visibility into sibling worktrees or open PRs, so this is the same conflict `execute-phase.md`'s phase_preflight_check step guards against, applied at the point recommendations are built rather than at dispatch time. Growth is the bash phase-iteration loop, the verdict-branch prose, and the warning-line template. Verified: 27751 -> 29416 bytes."
+    }
+  }
+}

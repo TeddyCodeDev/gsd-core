@@ -477,6 +477,7 @@
   "gsd-core/workflows/verify-work/steps/mvp-uat-framing.md",
   "hooks/gsd-check-update-worker.js",
   "hooks/gsd-check-update.js",
+  "hooks/gsd-codex-phase-dispatch-guard.js",
   "hooks/gsd-context-monitor.js",
   "hooks/managed-hooks-registry.cjs",
   "hooks/package.json",
