@@ -156,6 +156,34 @@ Handle responses:
 
 **If NOT all_complete**, build compound options from `recommended_actions`:
 
+**Preflight check (before building options):** `.planning/STATE.md` in this checkout only
+reflects what's been committed here — it has no visibility into a phase already being
+built on a different worktree or an open PR, possibly by a different session (this is how
+a real duplicate-work incident happened: see `worktree.phase-preflight`'s module docstring
+in `phase-preflight.cts`). Before offering `execute` or `plan` recommendations, check each
+recommended phase:
+
+```bash
+for PHASE in $(printf '%s' "$INIT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{const j=JSON.parse(d);const phases=(j.recommended_actions||[]).filter(a=>a.action==='execute'||a.action==='plan').map(a=>a.phase);process.stdout.write([...new Set(phases)].join(' '))})" 2>/dev/null); do
+  gsd_run query worktree phase-preflight "$PHASE"
+done
+```
+
+For any phase whose check returns `verdict: "existing_work_found"`: remove that phase's
+recommendation from the `Continue` bundle being built below, and instead surface it as its
+own warning line — do not silently drop it:
+
+```
+⚠ Phase {N} already has work elsewhere — not offering to dispatch it here:
+  worktree: {matchingWorktrees[0].path} [{matchingWorktrees[0].branch}]
+  PR #{matchingPullRequests[0].number}: {matchingPullRequests[0].title} ({matchingPullRequests[0].url})
+```
+
+A phase with `verdict: "safe_to_create"` (or an unresolved check — missing `gh`, no local
+worktree match either way) proceeds into the `Continue` bundle normally; this check is a
+warning system, not a hard dependency; a check that can't run must never block dispatch of
+a phase that genuinely has no existing work.
+
 **Compound option logic:** Group background actions (plan/execute) together, and pair them with the single inline action (discuss) when one exists. The goal is to present the fewest options possible — one option can dispatch multiple background agents plus one inline action.
 
 **Building options:**

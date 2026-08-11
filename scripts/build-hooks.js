@@ -58,6 +58,12 @@ const HOOKS_TO_COPY = [
   // at runtime — those ship as part of the full gsd-core/ tree, not via this
   // list.
   'gsd-agent-isolation-guard.js',
+  // Blocks a gsd-executor dispatch when the target phase already has work on a
+  // sibling worktree or open PR — hardens execute-phase.md's phase_preflight_check
+  // step (prose) at the tooling layer. Requires the sibling
+  // gsd-core/bin/lib/phase-preflight.cjs module at runtime — ships as part of the
+  // full gsd-core/ tree, not via this list.
+  'gsd-phase-dispatch-guard.js',
   'gsd-prompt-guard.js',
   'gsd-read-guard.js',
   'gsd-read-injection-scanner.js',
