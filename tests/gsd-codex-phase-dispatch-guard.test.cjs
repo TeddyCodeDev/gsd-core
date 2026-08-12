@@ -28,8 +28,9 @@ const EXISTING_WORK_RESULT = {
   ok: true,
   phase: '08',
   verdict: 'existing_work_found',
-  matchingWorktrees: [{ path: '/repo/.worktrees/pr99-fix', branch: 'v1.1/phase-08-onboarding' }],
+  matchingWorktrees: [{ path: '/repo/.worktrees/pr99-fix', branch: 'v1.1/phase-08-onboarding', lastCommitAt: null }],
   matchingPullRequests: [{ number: 99, title: 'Phase 8: Onboarding', url: 'https://x/99', updatedAt: 'now' }],
+  anyRecentMatch: false,
 };
 
 const SAFE_RESULT = {
@@ -39,6 +40,8 @@ const SAFE_RESULT = {
   matchingWorktrees: [],
   matchingPullRequests: [],
 };
+
+const NOW = Date.parse('2026-08-11T18:00:00Z');
 
 function executorPayload(cwd, message = 'Execute plan 01 of phase 08') {
   return { tool_name: 'spawn_agent', cwd, tool_input: { agent_type: 'gsd-executor', message } };
@@ -57,9 +60,38 @@ describe('Codex phase dispatch guard helpers', () => {
   });
 
   test('formats each positive worktree and pull-request signal', () => {
-    const reason = formatBlockReason('08', EXISTING_WORK_RESULT);
+    const reason = formatBlockReason('08', EXISTING_WORK_RESULT, NOW);
     assert.match(reason, /pr99-fix/);
     assert.match(reason, /#99/);
+  });
+
+  test('includes a relative-age clause for a worktree with a known lastCommitAt', () => {
+    const result = {
+      ...EXISTING_WORK_RESULT,
+      matchingWorktrees: [{ path: '/repo/.worktrees/pr99-fix', branch: 'v1.1/phase-08-onboarding', lastCommitAt: '2026-08-11T13:07:10Z' }],
+      matchingPullRequests: [],
+    };
+    const reason = formatBlockReason('08', result, NOW);
+    assert.match(reason, /last commit 5 hours ago/);
+  });
+
+  test('adds the active-session-check prompt when anyRecentMatch is true', () => {
+    const result = { ...EXISTING_WORK_RESULT, anyRecentMatch: true };
+    const reason = formatBlockReason('08', result, NOW);
+    assert.match(reason, /touched within the last 6 hours/);
+  });
+
+  test('adds the "looks abandoned" note when every match is affirmatively stale', () => {
+    const result = {
+      ok: true,
+      phase: '08',
+      verdict: 'existing_work_found',
+      matchingWorktrees: [{ path: '/repo/.worktrees/pr99-fix', branch: 'v1.1/phase-08-onboarding', lastCommitAt: '2026-06-01T00:00:00Z' }],
+      matchingPullRequests: [],
+      anyRecentMatch: false,
+    };
+    const reason = formatBlockReason('08', result, NOW);
+    assert.match(reason, /worth confirming they're not simply abandoned/);
   });
 });
 

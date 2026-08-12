@@ -36,8 +36,9 @@ const EXISTING_WORK_RESULT = {
   ok: true,
   phase: '08',
   verdict: 'existing_work_found',
-  matchingWorktrees: [{ path: '/repo/.worktrees/pr99-fix', branch: 'v1.1/phase-08-onboarding' }],
+  matchingWorktrees: [{ path: '/repo/.worktrees/pr99-fix', branch: 'v1.1/phase-08-onboarding', lastCommitAt: null }],
   matchingPullRequests: [{ number: 99, title: 'Phase 8: Onboarding', url: 'https://x/99', updatedAt: 'now' }],
+  anyRecentMatch: false,
 };
 
 const SAFE_RESULT = {
@@ -47,6 +48,8 @@ const SAFE_RESULT = {
   matchingWorktrees: [],
   matchingPullRequests: [],
 };
+
+const NOW = Date.parse('2026-08-11T18:00:00Z');
 
 // ─── isGsdProject ───────────────────────────────────────────────────────────────
 
@@ -72,11 +75,59 @@ describe('isGsdProject', () => {
 
 describe('formatBlockReason', () => {
   test('lists every matching worktree and PR, not just the first', () => {
-    const reason = formatBlockReason('08', EXISTING_WORK_RESULT);
+    const reason = formatBlockReason('08', EXISTING_WORK_RESULT, NOW);
     assert.match(reason, /\/repo\/\.worktrees\/pr99-fix/);
     assert.match(reason, /v1\.1\/phase-08-onboarding/);
     assert.match(reason, /#99/);
     assert.match(reason, /Phase 8: Onboarding/);
+  });
+
+  test('omits the age clause when lastCommitAt is null (degrades gracefully)', () => {
+    const reason = formatBlockReason('08', EXISTING_WORK_RESULT, NOW);
+    assert.doesNotMatch(reason, /last commit/);
+  });
+
+  test('includes a relative-age clause for a worktree with a known lastCommitAt', () => {
+    const result = {
+      ...EXISTING_WORK_RESULT,
+      matchingWorktrees: [{ path: '/repo/.worktrees/pr99-fix', branch: 'v1.1/phase-08-onboarding', lastCommitAt: '2026-08-11T13:07:10Z' }],
+      matchingPullRequests: [],
+    };
+    const reason = formatBlockReason('08', result, NOW);
+    assert.match(reason, /last commit 5 hours ago/);
+  });
+
+  test('adds the active-session-check prompt when anyRecentMatch is true', () => {
+    const result = { ...EXISTING_WORK_RESULT, anyRecentMatch: true };
+    const reason = formatBlockReason('08', result, NOW);
+    assert.match(reason, /touched within the last 6 hours/);
+    assert.match(reason, /check whether another session is currently active/);
+  });
+
+  test('does not add the active-session-check prompt when anyRecentMatch is false', () => {
+    const reason = formatBlockReason('08', EXISTING_WORK_RESULT, NOW);
+    assert.doesNotMatch(reason, /currently active/);
+  });
+
+  test('adds the "looks abandoned" note when every match is stale and anyRecentMatch is false', () => {
+    const result = {
+      ok: true,
+      phase: '08',
+      verdict: 'existing_work_found',
+      matchingWorktrees: [{ path: '/repo/.worktrees/pr99-fix', branch: 'v1.1/phase-08-onboarding', lastCommitAt: '2026-06-01T00:00:00Z' }],
+      matchingPullRequests: [],
+      anyRecentMatch: false,
+    };
+    const reason = formatBlockReason('08', result, NOW);
+    assert.match(reason, /worth confirming they're not simply abandoned/);
+  });
+
+  // Counter-test: a mix of stale and unknown-age matches must NOT trigger the
+  // "looks abandoned" note — that note is only warranted when EVERY match is
+  // affirmatively old, not merely "not known to be recent."
+  test('does not add the "looks abandoned" note when any match has an unknown age', () => {
+    const reason = formatBlockReason('08', EXISTING_WORK_RESULT, NOW);
+    assert.doesNotMatch(reason, /worth confirming/);
   });
 });
 

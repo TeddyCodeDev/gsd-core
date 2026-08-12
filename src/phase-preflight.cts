@@ -28,11 +28,15 @@ export interface PhasePreflightDeps {
   execGit?: ExecGitFn;
   execTool?: ExecToolFn;
   readFile?: (p: string) => string | null;
+  /** Reference time (epoch ms) for the anyRecentMatch computation. Defaults to Date.now(); tests inject a fixed value for determinism. */
+  now?: number;
 }
 
 export interface MatchingWorktree {
   path: string;
   branch: string;
+  /** ISO 8601 committer date of HEAD, or null if it couldn't be read. */
+  lastCommitAt: string | null;
 }
 
 export interface MatchingPullRequest {
@@ -58,6 +62,88 @@ export interface PhasePreflightResult {
   prCheckSkipped: boolean;
   prCheckSkipReason: string | null;
   verdict: 'existing_work_found' | 'safe_to_create' | null;
+  /**
+   * True when any match's last activity is within RECENT_THRESHOLD_MS. Purely
+   * informational — a hint that a live session may still be attached to the
+   * match, worth checking (e.g. a peer-session listing tool) before assuming
+   * it's safe to work around. Never changes the verdict itself: the worktree/PR
+   * check is authoritative regardless of age (see STALE_THRESHOLD_MS's docstring
+   * for why the inverse — "old, so assume abandoned" — is deliberately NOT
+   * auto-applied either).
+   */
+  anyRecentMatch: boolean;
+}
+
+/**
+ * How recently a match must have been touched to hint that a live session may
+ * still be working on it — worth an active-session check before assuming it's
+ * safe to route around. 6 hours: long enough to not fire on "someone worked on
+ * this earlier today and stepped away," short enough that a same-day dispatch
+ * collision (the actual risk this hints at) is still plausible.
+ */
+export const RECENT_THRESHOLD_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * How old a match's last-activity timestamp can be before the block message
+ * calls it out as likely-stale rather than active. Deliberately generous —
+ * multi-day phases are normal, and a paused-but-intentional WIP (see the PR
+ * #99-shaped incident this module exists because of) can sit untouched for
+ * days and still be exactly the work someone wants preserved. This only
+ * changes the WORDING of the block message, never the verdict: a stale-looking
+ * match still blocks, it just gets described differently so a human can judge
+ * for themselves rather than the guard silently deciding "old = abandoned."
+ */
+export const STALE_THRESHOLD_MS = 3 * 24 * 60 * 60 * 1000;
+
+/** Parses an ISO timestamp to epoch ms, or null if missing/unparseable. */
+function parseTimestamp(isoTimestamp: string | null | undefined): number | null {
+  if (!isoTimestamp) return null;
+  const t = Date.parse(isoTimestamp);
+  return Number.isFinite(t) ? t : null;
+}
+
+/** Is this timestamp within RECENT_THRESHOLD_MS of `now`? */
+export function isRecent(isoTimestamp: string | null | undefined, now: number = Date.now()): boolean {
+  const t = parseTimestamp(isoTimestamp);
+  return t !== null && (now - t) <= RECENT_THRESHOLD_MS;
+}
+
+/** Is this timestamp older than STALE_THRESHOLD_MS? */
+export function isStale(isoTimestamp: string | null | undefined, now: number = Date.now()): boolean {
+  const t = parseTimestamp(isoTimestamp);
+  return t !== null && (now - t) > STALE_THRESHOLD_MS;
+}
+
+/**
+ * Renders an ISO timestamp as a coarse "N unit(s) ago" string for block
+ * messages — minutes/hours/days/weeks, rounded, no false precision. Returns
+ * null (never a placeholder like "unknown") when the timestamp is missing or
+ * unparseable, so callers can omit the age clause entirely rather than print
+ * something misleading.
+ */
+export function formatRelativeAge(isoTimestamp: string | null | undefined, now: number = Date.now()): string | null {
+  const t = parseTimestamp(isoTimestamp);
+  if (t === null) return null;
+  const deltaMs = Math.max(0, now - t);
+  const MINUTE = 60 * 1000;
+  const HOUR = 60 * MINUTE;
+  const DAY = 24 * HOUR;
+  const WEEK = 7 * DAY;
+  if (deltaMs < MINUTE) return 'just now';
+  if (deltaMs < HOUR) {
+    const n = Math.round(deltaMs / MINUTE);
+    return `${n} minute${n === 1 ? '' : 's'} ago`;
+  }
+  if (deltaMs < DAY) {
+    const n = Math.round(deltaMs / HOUR);
+    return `${n} hour${n === 1 ? '' : 's'} ago`;
+  }
+  if (deltaMs < WEEK) {
+    const n = Math.round(deltaMs / DAY);
+    return `${n} day${n === 1 ? '' : 's'} ago`;
+  }
+  const n = Math.round(deltaMs / WEEK);
+  return `${n} week${n === 1 ? '' : 's'} ago`;
 }
 
 /** Escapes a string for safe interpolation into a RegExp source. */
@@ -117,13 +203,21 @@ export function matchesPhaseBranch(branchName: string, phaseNumber: string): boo
   return pattern.test(branchName);
 }
 
+/** A worktree/branch pair as parsed straight from porcelain output, before the lastCommitAt lookup. */
+interface WorktreeBranchEntry {
+  path: string;
+  branch: string;
+}
+
 /**
  * Parses `git worktree list --porcelain` output into {path, branch} pairs.
  * Detached-HEAD worktrees (no `branch` line) are omitted — they cannot match a
- * phase branch pattern by definition.
+ * phase branch pattern by definition. Pure parsing only — no lastCommitAt here,
+ * since that needs its own `git log` call per matching entry, done by the only
+ * caller (`findMatchingWorktrees`) after filtering, not for every worktree.
  */
-export function parseWorktreeListPorcelain(output: string): MatchingWorktree[] {
-  const entries: MatchingWorktree[] = [];
+export function parseWorktreeListPorcelain(output: string): WorktreeBranchEntry[] {
+  const entries: WorktreeBranchEntry[] = [];
   let currentPath = '';
   let currentBranch = '';
   const flush = (): void => {
@@ -171,9 +265,28 @@ export function findMatchingWorktrees(cwd: string, phaseNumber: string, deps: Ph
     ? posixNormalizePath(ownToplevelResult.stdout.trim())
     : null;
 
-  return parseWorktreeListPorcelain(result.stdout)
+  const matches = parseWorktreeListPorcelain(result.stdout)
     .filter((entry) => matchesPhaseBranch(entry.branch, phaseNumber))
     .filter((entry) => ownToplevel === null || posixNormalizePath(entry.path) !== ownToplevel);
+
+  return matches.map((entry) => ({
+    ...entry,
+    lastCommitAt: readLastCommitAt(entry.path, execGit),
+  }));
+}
+
+/**
+ * Reads the ISO 8601 committer date of a matching worktree's HEAD commit —
+ * purely a display hint for the block message ("last touched N ago"), never a
+ * basis for the verdict itself. Fails closed to null on any error or timeout;
+ * a missing age just omits that clause from the message, same fail-closed
+ * posture as the rest of this module's git calls.
+ */
+function readLastCommitAt(worktreePath: string, execGit: ExecGitFn): string | null {
+  const result = execGit(['log', '-1', '--format=%cI'], { cwd: worktreePath });
+  if (result.timedOut || result.exitCode !== 0) return null;
+  const trimmed = (result.stdout || '').trim();
+  return trimmed || null;
 }
 
 /** Normalizes path separators for cross-platform string comparison (Windows `git` emits `\`). */
@@ -257,6 +370,7 @@ export function checkPhaseWorktree(cwd: string, phaseArg: string | null | undefi
       prCheckSkipped: true,
       prCheckSkipReason: 'phase_unresolved',
       verdict: null,
+      anyRecentMatch: false,
     };
   }
 
@@ -265,6 +379,10 @@ export function checkPhaseWorktree(cwd: string, phaseArg: string | null | undefi
   const prResult = findMatchingPullRequests(cwd, phaseNumber, deps);
 
   const foundAnything = matchingWorktrees.length > 0 || prResult.matches.length > 0;
+  const now = deps.now ?? Date.now();
+  const anyRecentMatch =
+    matchingWorktrees.some((w) => isRecent(w.lastCommitAt, now)) ||
+    prResult.matches.some((pr) => isRecent(pr.updatedAt, now));
 
   return {
     ok: true,
@@ -275,6 +393,7 @@ export function checkPhaseWorktree(cwd: string, phaseArg: string | null | undefi
     prCheckSkipped: prResult.skipped,
     prCheckSkipReason: prResult.skipReason,
     verdict: foundAnything ? 'existing_work_found' : 'safe_to_create',
+    anyRecentMatch,
   };
 }
 

@@ -72,19 +72,49 @@ function isGsdProject(cwd) {
  * Formats the block message from a `checkPhaseWorktree` result whose verdict is
  * `existing_work_found`. Lists every matching worktree and PR, not just the first
  * — a phase could plausibly have both a stray local worktree AND an open PR from
- * different sessions.
+ * different sessions. Each entry gets a relative-age clause ("last commit 3 hours
+ * ago" / "updated 6 weeks ago") so the reader can judge active-vs-abandoned
+ * themselves — this never changes the block itself, only how it's described.
+ *
+ * `result.anyRecentMatch` (any match touched within RECENT_THRESHOLD_MS) adds an
+ * explicit prompt to check other active sessions before proceeding: the hook
+ * itself has no way to see other running sessions (that's a model-facing
+ * capability, e.g. a peer-session listing tool), but the model reading this
+ * block message does, and a recent match is exactly the case where a live
+ * session collision is plausible enough to be worth that extra check.
+ *
+ * `now` defaults to Date.now(); tests inject a fixed value for determinism
+ * (matches phase-preflight.cts's `deps.now` convention).
  */
-function formatBlockReason(phase, result) {
+function formatBlockReason(phase, result, now = Date.now()) {
+  const { formatRelativeAge, isStale } = require('../gsd-core/bin/lib/phase-preflight.cjs');
   const lines = [
     `Phase dispatch guard: phase ${phase} already has work elsewhere — refusing to ` +
     `dispatch a fresh gsd-executor from this checkout. Re-executing it would ` +
     `duplicate work already done, possibly by a different session.`,
   ];
   for (const wt of result.matchingWorktrees) {
-    lines.push(`  worktree: ${wt.path} [${wt.branch}]`);
+    const age = formatRelativeAge(wt.lastCommitAt, now);
+    const ageClause = age ? ` — last commit ${age}` : '';
+    lines.push(`  worktree: ${wt.path} [${wt.branch}]${ageClause}`);
   }
   for (const pr of result.matchingPullRequests) {
     lines.push(`  PR #${pr.number}: ${pr.title} (${pr.url}, updated ${pr.updatedAt})`);
+  }
+  if (result.anyRecentMatch) {
+    lines.push(
+      'At least one match was touched within the last 6 hours — before routing around ' +
+      'it, check whether another session is currently active on this project (e.g. list ' +
+      'other running agent sessions) rather than assuming it\'s safe to proceed elsewhere.'
+    );
+  } else {
+    const allStale =
+      result.matchingWorktrees.every((wt) => isStale(wt.lastCommitAt, now)) &&
+      result.matchingPullRequests.every((pr) => isStale(pr.updatedAt, now)) &&
+      (result.matchingWorktrees.length > 0 || result.matchingPullRequests.length > 0);
+    if (allStale) {
+      lines.push('All matches look old enough to be worth confirming they\'re not simply abandoned.');
+    }
   }
   lines.push(
     'Enter that worktree (or inspect the PR) instead. If the other work is genuinely ' +
@@ -138,7 +168,7 @@ function evaluateDispatch(data, deps = {}) {
     return { action: 'allow' };
   }
 
-  return { action: 'block', reason: formatBlockReason(phase, result) };
+  return { action: 'block', reason: formatBlockReason(phase, result, deps.now) };
 }
 
 /* istanbul ignore next -- stdin adapter, exercised via spawnSync in tests */

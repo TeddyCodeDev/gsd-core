@@ -6,7 +6,7 @@
  * Seam: gsd-core/bin/lib/phase-preflight.cjs
  * Interface: normalizePhaseNumber, resolveCurrentPhaseFromState, matchesPhaseBranch,
  *            parseWorktreeListPorcelain, findMatchingWorktrees, findMatchingPullRequests,
- *            checkPhaseWorktree, cmdPhasePreflight
+ *            checkPhaseWorktree, cmdPhasePreflight, isRecent, isStale, formatRelativeAge
  *
  * All tests use dependency injection (inline stubs) — no real filesystem, git, or
  * gh process is exercised.
@@ -29,6 +29,11 @@ const {
   findMatchingPullRequests,
   checkPhaseWorktree,
   cmdPhasePreflight,
+  isRecent,
+  isStale,
+  formatRelativeAge,
+  RECENT_THRESHOLD_MS,
+  STALE_THRESHOLD_MS,
 } = require(MODULE_PATH);
 
 const PASSTHROUGH = Object.freeze({ exitCode: 0, stdout: '', stderr: '', signal: null, error: null, timedOut: false });
@@ -127,15 +132,17 @@ describe('parseWorktreeListPorcelain', () => {
 
 /**
  * Builds an arg-aware execGit stub: `git worktree list --porcelain` returns
- * `worktreeListStdout`, `git rev-parse --show-toplevel` returns `ownToplevel`.
- * Real `execGit` behaves differently per subcommand — a stub that ignores
- * `args` would silently mis-test the self-exclusion logic below (contract 5,
- * "complete mocks": mock the dependency's actual branching, not a flattened
- * stand-in for it).
+ * `worktreeListStdout`, `git rev-parse --show-toplevel` returns `ownToplevel`,
+ * `git log -1 --format=%cI` (run per matching entry, cwd-scoped) returns
+ * `lastCommitAt`. Real `execGit` behaves differently per subcommand — a stub
+ * that ignores `args` would silently mis-test the self-exclusion logic below
+ * (contract 5, "complete mocks": mock the dependency's actual branching, not a
+ * flattened stand-in for it).
  */
-function makeWorktreeExecGit(worktreeListStdout, ownToplevel = '/repo') {
+function makeWorktreeExecGit(worktreeListStdout, ownToplevel = '/repo', lastCommitAt = '2026-08-11T13:07:10-06:00') {
   return (args) => {
     if (args[0] === 'rev-parse') return { ...PASSTHROUGH, stdout: ownToplevel };
+    if (args[0] === 'log') return { ...PASSTHROUGH, stdout: lastCommitAt };
     return { ...PASSTHROUGH, stdout: worktreeListStdout };
   };
 }
@@ -149,11 +156,12 @@ describe('findMatchingWorktrees', () => {
     'branch refs/heads/v1.1/phase-08-onboarding',
     '',
   ].join('\n');
+  const COMMIT_AT = '2026-08-11T13:07:10-06:00';
 
-  test('returns only worktrees whose branch matches the phase', () => {
-    const execGit = makeWorktreeExecGit(TWO_WORKTREES, '/repo/main-checkout-not-in-list');
+  test('returns only worktrees whose branch matches the phase, with lastCommitAt populated', () => {
+    const execGit = makeWorktreeExecGit(TWO_WORKTREES, '/repo/main-checkout-not-in-list', COMMIT_AT);
     const result = findMatchingWorktrees('/repo', '08', { execGit });
-    assert.deepStrictEqual(result, [{ path: '/repo/.worktrees/pr99-fix', branch: 'v1.1/phase-08-onboarding' }]);
+    assert.deepStrictEqual(result, [{ path: '/repo/.worktrees/pr99-fix', branch: 'v1.1/phase-08-onboarding', lastCommitAt: COMMIT_AT }]);
   });
 
   // Counter-test: a session running FROM the matching worktree itself must not
@@ -168,10 +176,11 @@ describe('findMatchingWorktrees', () => {
   test('self-exclusion degrades to no exclusion when the toplevel lookup fails', () => {
     const execGit = (args) => {
       if (args[0] === 'rev-parse') return { ...PASSTHROUGH, exitCode: 128 };
+      if (args[0] === 'log') return { ...PASSTHROUGH, stdout: COMMIT_AT };
       return { ...PASSTHROUGH, stdout: TWO_WORKTREES };
     };
     const result = findMatchingWorktrees('/repo/.worktrees/pr99-fix', '08', { execGit });
-    assert.deepStrictEqual(result, [{ path: '/repo/.worktrees/pr99-fix', branch: 'v1.1/phase-08-onboarding' }]);
+    assert.deepStrictEqual(result, [{ path: '/repo/.worktrees/pr99-fix', branch: 'v1.1/phase-08-onboarding', lastCommitAt: COMMIT_AT }]);
   });
 
   // Counter-test: git failure must degrade to an empty list, not throw.
@@ -186,6 +195,29 @@ describe('findMatchingWorktrees', () => {
   test('degrades to an empty list on git timeout', () => {
     const execGit = () => ({ ...PASSTHROUGH, timedOut: true });
     assert.deepStrictEqual(findMatchingWorktrees('/repo', '08', { execGit }), []);
+  });
+
+  // Counter-test: the lastCommitAt lookup is a separate git call from the
+  // worktree-list/rev-parse ones above — its own failure must degrade that one
+  // entry's lastCommitAt to null, not drop the entry or throw.
+  test('lastCommitAt degrades to null when the git log call fails, entry still returned', () => {
+    const execGit = (args) => {
+      if (args[0] === 'rev-parse') return { ...PASSTHROUGH, stdout: '/repo/main-checkout-not-in-list' };
+      if (args[0] === 'log') return { ...PASSTHROUGH, exitCode: 128, stderr: 'fatal: bad revision' };
+      return { ...PASSTHROUGH, stdout: TWO_WORKTREES };
+    };
+    const result = findMatchingWorktrees('/repo', '08', { execGit });
+    assert.deepStrictEqual(result, [{ path: '/repo/.worktrees/pr99-fix', branch: 'v1.1/phase-08-onboarding', lastCommitAt: null }]);
+  });
+
+  test('lastCommitAt degrades to null when the git log call times out', () => {
+    const execGit = (args) => {
+      if (args[0] === 'rev-parse') return { ...PASSTHROUGH, stdout: '/repo/main-checkout-not-in-list' };
+      if (args[0] === 'log') return { ...PASSTHROUGH, timedOut: true };
+      return { ...PASSTHROUGH, stdout: TWO_WORKTREES };
+    };
+    const result = findMatchingWorktrees('/repo', '08', { execGit });
+    assert.strictEqual(result[0].lastCommitAt, null);
   });
 });
 
@@ -268,6 +300,91 @@ describe('resolveCurrentPhaseFromState', () => {
   });
 });
 
+// ─── isRecent / isStale / formatRelativeAge ──────────────────────────────────────
+
+describe('isRecent', () => {
+  const NOW = Date.parse('2026-08-11T18:00:00Z');
+
+  test('true for a timestamp within RECENT_THRESHOLD_MS', () => {
+    assert.strictEqual(isRecent('2026-08-11T13:07:10Z', NOW), true);
+  });
+
+  test('false for a timestamp older than RECENT_THRESHOLD_MS', () => {
+    assert.strictEqual(isRecent('2026-08-10T00:00:00Z', NOW), false);
+  });
+
+  // Counter-test: exactly at the boundary is still "recent" (inclusive <=,
+  // matching isStale's exclusive > on the other threshold — no gap where a
+  // timestamp is neither recent nor stale-eligible near the same instant).
+  test('true exactly at the RECENT_THRESHOLD_MS boundary', () => {
+    const boundary = new Date(NOW - RECENT_THRESHOLD_MS).toISOString();
+    assert.strictEqual(isRecent(boundary, NOW), true);
+  });
+
+  test('false for null/undefined/unparseable input', () => {
+    assert.strictEqual(isRecent(null, NOW), false);
+    assert.strictEqual(isRecent(undefined, NOW), false);
+    assert.strictEqual(isRecent('not-a-date', NOW), false);
+  });
+});
+
+describe('isStale', () => {
+  const NOW = Date.parse('2026-08-11T18:00:00Z');
+
+  test('true for a timestamp older than STALE_THRESHOLD_MS', () => {
+    assert.strictEqual(isStale('2026-07-01T00:00:00Z', NOW), true);
+  });
+
+  test('false for a recent timestamp', () => {
+    assert.strictEqual(isStale('2026-08-11T13:07:10Z', NOW), false);
+  });
+
+  test('false exactly at the STALE_THRESHOLD_MS boundary (only strictly-older counts)', () => {
+    const boundary = new Date(NOW - STALE_THRESHOLD_MS).toISOString();
+    assert.strictEqual(isStale(boundary, NOW), false);
+  });
+
+  test('false for null/undefined/unparseable input — unknown age never claims staleness', () => {
+    assert.strictEqual(isStale(null, NOW), false);
+    assert.strictEqual(isStale(undefined, NOW), false);
+    assert.strictEqual(isStale('not-a-date', NOW), false);
+  });
+});
+
+describe('formatRelativeAge', () => {
+  const NOW = Date.parse('2026-08-11T18:00:00Z');
+
+  test('renders minutes for sub-hour deltas', () => {
+    assert.strictEqual(formatRelativeAge('2026-08-11T17:45:00Z', NOW), '15 minutes ago');
+  });
+
+  test('renders singular "1 minute ago"', () => {
+    assert.strictEqual(formatRelativeAge('2026-08-11T17:59:00Z', NOW), '1 minute ago');
+  });
+
+  test('renders "just now" for sub-minute deltas', () => {
+    assert.strictEqual(formatRelativeAge('2026-08-11T17:59:50Z', NOW), 'just now');
+  });
+
+  test('renders hours for sub-day deltas', () => {
+    assert.strictEqual(formatRelativeAge('2026-08-11T13:07:10Z', NOW), '5 hours ago');
+  });
+
+  test('renders days for sub-week deltas', () => {
+    assert.strictEqual(formatRelativeAge('2026-08-08T18:00:00Z', NOW), '3 days ago');
+  });
+
+  test('renders weeks for deltas of a week or more', () => {
+    assert.strictEqual(formatRelativeAge('2026-07-14T18:00:00Z', NOW), '4 weeks ago');
+  });
+
+  test('returns null for null/undefined/unparseable input', () => {
+    assert.strictEqual(formatRelativeAge(null, NOW), null);
+    assert.strictEqual(formatRelativeAge(undefined, NOW), null);
+    assert.strictEqual(formatRelativeAge('not-a-date', NOW), null);
+  });
+});
+
 // ─── checkPhaseWorktree (integration of the above) ───────────────────────────────
 
 describe('checkPhaseWorktree', () => {
@@ -326,6 +443,60 @@ describe('checkPhaseWorktree', () => {
     const result = checkPhaseWorktree('/repo', '08', { execGit, execTool });
     assert.strictEqual(result.prCheckSkipped, true);
     assert.strictEqual(result.verdict, 'existing_work_found');
+  });
+
+  const NOW = Date.parse('2026-08-11T18:00:00Z');
+
+  test('anyRecentMatch is true when the matching worktree\'s last commit is within 6 hours', () => {
+    const execGit = makeWorktreeExecGit(
+      'worktree /repo/.worktrees/pr99-fix\nbranch refs/heads/v1.1/phase-08-onboarding\n',
+      '/repo',
+      '2026-08-11T13:07:10Z', // 4h53m before NOW
+    );
+    const execTool = () => ({ ...PASSTHROUGH, stdout: '[]' });
+    const result = checkPhaseWorktree('/repo', '08', { execGit, execTool, now: NOW });
+    assert.strictEqual(result.anyRecentMatch, true);
+  });
+
+  test('anyRecentMatch is true when the matching PR\'s updatedAt is within 6 hours (worktree stale)', () => {
+    const execGit = makeWorktreeExecGit(
+      'worktree /repo/.worktrees/pr99-fix\nbranch refs/heads/v1.1/phase-08-onboarding\n',
+      '/repo',
+      '2026-06-01T00:00:00Z', // long stale
+    );
+    const execTool = () => ({
+      ...PASSTHROUGH,
+      stdout: JSON.stringify([{ number: 99, headRefName: 'v1.1/phase-08-onboarding', title: 't', url: 'u', updatedAt: '2026-08-11T15:00:00Z' }]),
+    });
+    const result = checkPhaseWorktree('/repo', '08', { execGit, execTool, now: NOW });
+    assert.strictEqual(result.anyRecentMatch, true);
+  });
+
+  test('anyRecentMatch is false when every match is older than 6 hours', () => {
+    const execGit = makeWorktreeExecGit(
+      'worktree /repo/.worktrees/pr99-fix\nbranch refs/heads/v1.1/phase-08-onboarding\n',
+      '/repo',
+      '2026-08-01T00:00:00Z',
+    );
+    const execTool = () => ({
+      ...PASSTHROUGH,
+      stdout: JSON.stringify([{ number: 99, headRefName: 'v1.1/phase-08-onboarding', title: 't', url: 'u', updatedAt: '2026-08-01T00:00:00Z' }]),
+    });
+    const result = checkPhaseWorktree('/repo', '08', { execGit, execTool, now: NOW });
+    assert.strictEqual(result.anyRecentMatch, false);
+  });
+
+  test('anyRecentMatch is false when nothing matches', () => {
+    const execGit = makeWorktreeExecGit('worktree /repo\nbranch refs/heads/develop\n', '/repo');
+    const execTool = () => ({ ...PASSTHROUGH, stdout: '[]' });
+    const result = checkPhaseWorktree('/repo', '09', { execGit, execTool, now: NOW });
+    assert.strictEqual(result.anyRecentMatch, false);
+  });
+
+  test('anyRecentMatch is false on the phase_unresolved early return', () => {
+    const readFile = () => null;
+    const result = checkPhaseWorktree('/repo', null, { readFile });
+    assert.strictEqual(result.anyRecentMatch, false);
   });
 });
 

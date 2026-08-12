@@ -35,17 +35,43 @@ function extractPhase(text) {
   return match ? match[1] : null;
 }
 
-function formatBlockReason(phase, result) {
+/**
+ * Same message shape as the Claude-side guard's formatBlockReason (kept in sync
+ * by hand — both hooks predate a shared-formatter extraction and this is a
+ * small enough function that duplicating it beats adding a require-cycle risk
+ * between the two hook entry points). See that file's docstring for the
+ * anyRecentMatch/isStale rationale. `now` defaults to Date.now(); tests
+ * inject a fixed value for determinism.
+ */
+function formatBlockReason(phase, result, now = Date.now()) {
+  const { formatRelativeAge, isStale } = require('../gsd-core/bin/lib/phase-preflight.cjs');
   const lines = [
     `Phase dispatch guard: phase ${phase} already has work elsewhere — refusing to ` +
     `dispatch a fresh gsd-executor from this checkout. Re-executing it would ` +
     `duplicate work already done, possibly by a different session.`,
   ];
   for (const wt of result.matchingWorktrees) {
-    lines.push(`  worktree: ${wt.path} [${wt.branch}]`);
+    const age = formatRelativeAge(wt.lastCommitAt, now);
+    const ageClause = age ? ` — last commit ${age}` : '';
+    lines.push(`  worktree: ${wt.path} [${wt.branch}]${ageClause}`);
   }
   for (const pr of result.matchingPullRequests) {
     lines.push(`  PR #${pr.number}: ${pr.title} (${pr.url}, updated ${pr.updatedAt})`);
+  }
+  if (result.anyRecentMatch) {
+    lines.push(
+      'At least one match was touched within the last 6 hours — before routing around ' +
+      'it, check whether another session is currently active on this project (e.g. list ' +
+      'other running agent sessions) rather than assuming it\'s safe to proceed elsewhere.'
+    );
+  } else {
+    const allStale =
+      result.matchingWorktrees.every((wt) => isStale(wt.lastCommitAt, now)) &&
+      result.matchingPullRequests.every((pr) => isStale(pr.updatedAt, now)) &&
+      (result.matchingWorktrees.length > 0 || result.matchingPullRequests.length > 0);
+    if (allStale) {
+      lines.push('All matches look old enough to be worth confirming they\'re not simply abandoned.');
+    }
   }
   lines.push(
     'Enter that worktree (or inspect the PR) instead. If the other work is genuinely ' +
@@ -87,7 +113,7 @@ function evaluateCodexDispatch(data, deps = {}) {
   if (!result || !result.ok || result.verdict !== 'existing_work_found') {
     return { action: 'allow' };
   }
-  return { action: 'block', reason: formatBlockReason(phase, result) };
+  return { action: 'block', reason: formatBlockReason(phase, result, deps.now) };
 }
 
 /* istanbul ignore next -- stdin adapter, exercised via spawnSync in tests */
