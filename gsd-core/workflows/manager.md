@@ -160,18 +160,21 @@ Handle responses:
 reflects what's been committed here — it has no visibility into a phase already being
 built on a different worktree or an open PR, possibly by a different session (this is how
 a real duplicate-work incident happened: see `worktree.phase-preflight`'s module docstring
-in `phase-preflight.cts`). Before offering `execute` or `plan` recommendations, check each
-recommended phase:
+in `phase-preflight.cts`). Before offering `execute`, `plan`, or `discuss` recommendations,
+check each recommended phase — `discuss` is included because it can just as easily duplicate
+or diverge from context/research/plans that already exist on another worktree or PR as
+`execute`/`plan` can dispatch duplicate implementation work:
 
 ```bash
-for PHASE in $(printf '%s' "$INIT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{const j=JSON.parse(d);const phases=(j.recommended_actions||[]).filter(a=>a.action==='execute'||a.action==='plan').map(a=>a.phase);process.stdout.write([...new Set(phases)].join(' '))})" 2>/dev/null); do
+for PHASE in $(printf '%s' "$INIT" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{const j=JSON.parse(d);const phases=(j.recommended_actions||[]).filter(a=>a.action==='execute'||a.action==='plan'||a.action==='discuss').map(a=>a.phase);process.stdout.write([...new Set(phases)].join(' '))})" 2>/dev/null); do
   gsd_run query worktree phase-preflight "$PHASE"
 done
 ```
 
 For any phase whose check returns `verdict: "existing_work_found"`: remove that phase's
-recommendation from the `Continue` bundle being built below, and instead surface it as its
-own warning line — do not silently drop it:
+recommendation from the `Continue` bundle being built below — if it was the discuss
+recommendation, drop it as the inline action instead of bundling it — and instead surface it
+as its own warning line — do not silently drop it:
 
 ```
 ⚠ Phase {N} already has work elsewhere — not offering to dispatch it here:
