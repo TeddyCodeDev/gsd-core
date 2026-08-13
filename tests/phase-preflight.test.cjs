@@ -274,6 +274,51 @@ describe('findMatchingPullRequests', () => {
     const result = findMatchingPullRequests('/repo', '08', { execTool });
     assert.strictEqual(result.skipReason, 'gh_output_unparseable');
   });
+
+  // Self-exclusion (mirrors findMatchingWorktrees's toplevel self-exclusion): a
+  // matching PR whose head branch is the caller's OWN current branch is not
+  // "existing work elsewhere" — it's the caller's own in-progress work, made
+  // visible on GitHub from the same worktree that's asking. Regression guard for
+  // the false positive where a session's own draft PR tripped the phase dispatch
+  // guard on itself.
+  test('excludes a matching PR whose head branch equals the caller\'s own current branch', () => {
+    const execTool = () => ({
+      ...PASSTHROUGH,
+      stdout: JSON.stringify([
+        { number: 115, headRefName: 'v1.1/phase-09-input-wizard', title: 'Phase 9', url: 'https://github.com/x/y/pull/115', updatedAt: '2026-08-13T05:57:03Z' },
+      ]),
+    });
+    const execGit = () => ({ ...PASSTHROUGH, stdout: 'v1.1/phase-09-input-wizard\n' });
+    const result = findMatchingPullRequests('/repo', '09', { execTool, execGit });
+    assert.strictEqual(result.skipped, false);
+    assert.deepStrictEqual(result.matches, []);
+  });
+
+  test('still reports a matching PR on a different branch than the caller\'s own', () => {
+    const execTool = () => ({
+      ...PASSTHROUGH,
+      stdout: JSON.stringify([
+        { number: 115, headRefName: 'v1.1/phase-09-input-wizard', title: 'Phase 9', url: 'https://github.com/x/y/pull/115', updatedAt: '2026-08-13T05:57:03Z' },
+      ]),
+    });
+    const execGit = () => ({ ...PASSTHROUGH, stdout: 'main\n' });
+    const result = findMatchingPullRequests('/repo', '09', { execTool, execGit });
+    assert.strictEqual(result.matches.length, 1);
+    assert.strictEqual(result.matches[0].number, 115);
+  });
+
+  test('degrades to reporting all matches when the own-branch lookup fails (fail-open)', () => {
+    const execTool = () => ({
+      ...PASSTHROUGH,
+      stdout: JSON.stringify([
+        { number: 115, headRefName: 'v1.1/phase-09-input-wizard', title: 'Phase 9', url: 'https://github.com/x/y/pull/115', updatedAt: '2026-08-13T05:57:03Z' },
+      ]),
+    });
+    const execGit = () => ({ ...PASSTHROUGH, exitCode: 128, stderr: 'fatal: not a git repository' });
+    const result = findMatchingPullRequests('/repo', '09', { execTool, execGit });
+    assert.strictEqual(result.matches.length, 1);
+    assert.strictEqual(result.matches[0].number, 115);
+  });
 });
 
 // ─── resolveCurrentPhaseFromState ────────────────────────────────────────────────

@@ -309,9 +309,21 @@ function posixNormalizePath(p: string): string {
  * also runs synchronously inside `gsd-phase-dispatch-guard.js`'s PreToolUse hook,
  * on every executor dispatch, so a slow or hung `gh` call must degrade quickly
  * rather than stall every dispatch for up to 30s.
+ *
+ * Excludes a PR whose head branch equals the CALLER's own current branch
+ * (resolved via `git rev-parse --abbrev-ref HEAD` at `cwd`) — same rationale and
+ * same best-effort/fail-open posture as `findMatchingWorktrees`'s toplevel
+ * self-exclusion: a session running phase commands from the one true worktree
+ * for that phase, on the exact branch a PR was opened from, is that PR's own
+ * author, not "existing work elsewhere." Without this, a session that pushed
+ * its own branch and opened a draft PR to make in-progress work visible (the
+ * documented motivation for doing so — see `gsd-phase-dispatch-guard.js`'s
+ * docstring) would trip this guard on itself the next time it dispatched. If
+ * the branch lookup fails, no PR is excluded (degrades to prior behavior).
  */
 export function findMatchingPullRequests(cwd: string, phaseNumber: string, deps: PhasePreflightDeps = {}): PullRequestCheckResult {
   const execTool = deps.execTool ?? execToolSeam;
+  const execGit = deps.execGit ?? execGitSeam;
   const result = execTool('gh', [
     'pr', 'list', '--state', 'open',
     '--json', 'number,headRefName,title,url,updatedAt',
@@ -337,10 +349,16 @@ export function findMatchingPullRequests(cwd: string, phaseNumber: string, deps:
     return { matches: [], skipped: true, skipReason: 'gh_output_unparseable' };
   }
 
+  const ownBranchResult = execGit(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd });
+  const ownBranch = (!ownBranchResult.timedOut && ownBranchResult.exitCode === 0)
+    ? ownBranchResult.stdout.trim()
+    : null;
+
   const asString = (value: unknown): string => typeof value === 'string' ? value : '';
   const asNumber = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) ? value : 0;
   const matches = (parsed as Array<Record<string, unknown>>)
     .filter((pr) => matchesPhaseBranch(asString(pr.headRefName), phaseNumber))
+    .filter((pr) => ownBranch === null || asString(pr.headRefName) !== ownBranch)
     .map((pr) => ({
       number: asNumber(pr.number),
       headRefName: asString(pr.headRefName),
