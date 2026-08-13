@@ -72,6 +72,15 @@ PATTERNS=(
   # `eval('...')` (single-quoted) silently went undetected on macOS while
   # passing on GNU-grep CI runners. Found auditing #3175; fixed here since it
   # is the same unanchored/portability defect class as the boundary fix.
+  #
+  # `exec` stays receiver-blind on purpose. A left boundary that excludes a
+  # preceding `.` would drop every member-position `.exec('…')` — including
+  # `require('child_process').exec('…')`, the single most common Node spelling
+  # of the vector this pattern exists to catch — and a receiver allowlist
+  # cannot restore it, because the literal `child_process` is not adjacent to
+  # `.exec`. The cost is that `RegExp.prototype.exec`, which takes a subject
+  # string rather than code, also matches; files that legitimately call it are
+  # handled by ALLOWLIST below, never by narrowing the pattern.
   '(^|[^[:alnum:]])eval[[:space:]]*\([[:space:]]*["'"'"']'
   'exec[[:space:]]*\([[:space:]]*["'"'"']'
   '(^|[^[:alnum:]])Function[[:space:]]*\([[:space:]]*["'"'"'].*return'
@@ -129,6 +138,22 @@ ALLOWLIST=(
   # asserts nothing: it is the payload the guard is required to catch, carried
   # as test DATA. Same class as the read-injection-scanner suites above.
   'tests/kimi-payload-field-shadowing.security.test.cjs'
+  # Phase-ID grammar regression tests exercise `RegExp.prototype.exec` via
+  # `re.exec('<phase-id>')` against fixtures like 'MANIFOLD-64-auth' / 'CK-64-auth'.
+  # The scanner's `exec('` code-execution pattern matches that benign method call,
+  # not an attack vector — same DEFECT.PROMPT-INJECTION-SCAN-COLLISION class as the
+  # test fixtures above. Pre-existing content (16 such calls on `next`); it surfaces
+  # here only because #2573's W024 `state_head` assertions make the file appear in
+  # the changed-file set the diff-mode scan walks.
+  'tests/health-validation.test.cjs'
+  # #2528 — same collision, same disposition: the continuation-grammar suite
+  # drives the tokenizer regexes directly via `re.exec('05-80-20')`, so the
+  # argument is the subject string, not a command. Exempted per file rather
+  # than by narrowing the `exec(` pattern: a left boundary excluding a preceding
+  # `.` would drop `require('child_process').exec('…')`, and a receiver
+  # allowlist cannot reach it either, because the literal `child_process` is
+  # not adjacent to `.exec`. See the note at the pattern itself.
+  'tests/continuation-grammar-parity.test.cjs'
 )
 
 is_allowlisted() {
