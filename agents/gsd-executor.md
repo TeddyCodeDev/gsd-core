@@ -485,7 +485,7 @@ is unavoidable, always derive it from `git rev-parse --show-toplevel` run inside
 not from a `pwd` captured in the orchestrator context.
 
 **0. Pre-commit HEAD safety assertion (worktree mode only, MANDATORY before every commit — #2924):**
-When running inside a Claude Code worktree (`.git` is a file, not a directory), assert HEAD is on a per-agent branch BEFORE staging or committing. If HEAD has drifted onto a protected ref, HALT — never self-recover via `git update-ref refs/heads/<protected>`:
+When running inside a Claude Code worktree (`.git` is a file, not a directory), assert HEAD is on a per-agent branch BEFORE staging or committing. A project may explicitly opt in to manual status-stack worktrees through `.planning/config.json` `git.status_stack`; its declared `status_branch` and `phase_branch_prefix` are also allowed. This narrow exception lets a developer test and pull an intentionally managed phase branch without relaxing the protected-ref rule. If HEAD has drifted onto a protected ref, HALT — never self-recover via `git update-ref refs/heads/<protected>`:
 ```bash
 if [ -f .git ]; then  # worktree
   HEAD_REF=$(git symbolic-ref --quiet HEAD || echo "DETACHED")
@@ -497,12 +497,22 @@ if [ -f .git ]; then  # worktree
     echo "DO NOT use 'git update-ref' to rewind the protected branch — surface as blocker (#2924)." >&2
     exit 1
   fi
-  # Positive allow-list: HEAD must be on a per-agent branch (`agent-<id>` or
-  # legacy `worktree-agent-<id>`). This catches feature/* and any other
-  # arbitrary branch that the deny-list would silently allow (#2924, #1995).
-  if ! echo "$ACTUAL_BRANCH" | grep -Eq '^((worktree-)?agent-|worktree-wf_)[A-Za-z0-9._/-]+$'; then
-    echo "FATAL: refusing to commit — worktree HEAD '$ACTUAL_BRANCH' is not in the agent-* / worktree-agent-* / worktree-wf_* namespace." >&2
-    echo "Agent commits must live on per-agent branches; surface as blocker (#2924)." >&2
+  # Positive allow-list: agent branches are always permitted. A manual branch
+  # is permitted only when the project itself names it in git.status_stack;
+  # no prefix is accepted unless that opt-in config is valid.
+  MANAGED_STACK_BRANCH=$(node -e '
+    const fs = require("fs");
+    try {
+      const config = JSON.parse(fs.readFileSync(".planning/config.json", "utf8"));
+      const stack = config?.git?.status_stack;
+      const branch = process.argv[1];
+      console.log(stack && (branch === stack.status_branch || branch.startsWith(stack.phase_branch_prefix)) ? "1" : "0");
+    } catch { console.log("0"); }
+  ' "$ACTUAL_BRANCH" 2>/dev/null)
+  if ! echo "$ACTUAL_BRANCH" | grep -Eq '^((worktree-)?agent-|worktree-wf_)[A-Za-z0-9._/-]+$' && \
+     [ "$MANAGED_STACK_BRANCH" != "1" ]; then
+    echo "FATAL: refusing to commit — worktree HEAD '$ACTUAL_BRANCH' is not an agent branch or a configured status-stack branch." >&2
+    echo "Agent commits must live on per-agent branches unless git.status_stack explicitly allows this manual branch (#2924)." >&2
     exit 1
   fi
 fi

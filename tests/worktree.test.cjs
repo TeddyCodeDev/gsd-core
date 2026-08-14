@@ -192,6 +192,14 @@ describe('canonical worktree-branch-check fragment is the single source of truth
   });
 });
 
+test('gsd-executor allows only opt-in status-stack branches for manual worktree testing', () => {
+  const executor = fs.readFileSync(EXECUTOR_AGENT_PATH, 'utf8');
+  assert.match(executor, /git\.status_stack/);
+  assert.match(executor, /stack\.status_branch/);
+  assert.match(executor, /branch\.startsWith\(stack\.phase_branch_prefix\)/);
+  assert.match(executor, /MANAGED_STACK_BRANCH/);
+});
+
 // ─── #48: execute-plan mandate is verify-only ───────────────────────────────
 
 describe('bug #48: execute-plan.md worktree mandate is verify-only', () => {
