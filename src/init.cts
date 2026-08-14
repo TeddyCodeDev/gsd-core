@@ -2388,7 +2388,11 @@ function cmdInitManager(cwd: string, raw: boolean): void {
         normalized,
         _slashRuntime,
       );
-      if (stackedSnapshot.hasDirectory) {
+      // A status branch may legitimately gain new planning artifacts before its
+      // dashboard commit is propagated through the phase stack. Its local
+      // artifacts are newer authority in that interval; only fill a genuinely
+      // absent local phase from the aligned phase-worktree projection.
+      if (!snapshot.hasDirectory && stackedSnapshot.hasDirectory) {
         snapshot = stackedSnapshot;
         statusSource = 'status_stack_worktree';
         statusWorktree = statusStackDashboardSource.path;

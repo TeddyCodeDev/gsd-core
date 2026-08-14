@@ -177,14 +177,15 @@ describe('init manager', () => {
       runGit(phaseWorktree, ['add', '.planning/phases']);
       runGit(phaseWorktree, ['commit', '-m', 'Add phase plan']);
       runGit(tmpDir, ['checkout', 'gsd-status']);
+      scaffoldPhase(tmpDir, 1, { slug: 'foundation', context: true, plans: 2 });
 
       const result = runGsdTools('init manager', tmpDir);
       assert.ok(result.success, `Command failed: ${result.error}`);
       const phase = JSON.parse(result.output).phases[0];
       assert.strictEqual(phase.disk_status, 'planned');
-      assert.strictEqual(phase.plan_count, 1);
-      assert.strictEqual(phase.status_source, 'status_stack_worktree');
-      assert.strictEqual(fs.realpathSync(phase.status_worktree), fs.realpathSync(phaseWorktree));
+      assert.strictEqual(phase.plan_count, 2);
+      assert.strictEqual(phase.status_source, 'current_worktree');
+      assert.strictEqual(phase.status_worktree, null);
     } finally {
       if (worktreeCreated) runGit(tmpDir, ['worktree', 'remove', '--force', phaseWorktree]);
     }
