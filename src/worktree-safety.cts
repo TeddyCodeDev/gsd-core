@@ -79,6 +79,228 @@ function parseWorktreeListPaths(porcelain: string): string[] {
   return parseWorktreeEntries(porcelain).map((entry) => entry.path);
 }
 
+// ─── Status-stack policy ─────────────────────────────────────────────────────
+//
+// A project can opt in through .planning/config.json:
+//
+// {
+//   "git": {
+//     "status_stack": {
+//       "base_branch": "develop",
+//       "status_branch": "gsd-status",
+//       "phase_branch_prefix": "v1.1/phase-"
+//     }
+//   }
+// }
+//
+// The status branch is the authoritative metadata snapshot. Phase branches are
+// discovered from the prefix, sorted by their numeric phase component, and must
+// form an ancestry chain after the status branch. A fresh status commit therefore
+// makes the check fail until it is merged through every phase branch.
+
+interface StatusStackConfig {
+  baseBranch: string;
+  statusBranch: string;
+  phaseBranchPrefix: string;
+}
+
+interface StatusStackEdge {
+  from: string;
+  to: string;
+  aligned: boolean;
+}
+
+interface StatusStackResult {
+  configured: boolean;
+  verdict: 'aligned' | 'misaligned' | 'unavailable' | 'not_configured';
+  reason: string;
+  base_branch: string | null;
+  status_branch: string | null;
+  phase_branches: string[];
+  edges: StatusStackEdge[];
+  current_branch: string | null;
+  current_status_branch: boolean | null;
+}
+
+function parseStatusStackConfig(cwd: string, deps: WorktreeDeps = {}): StatusStackConfig | null {
+  const readFile = deps.readFileSync || ((p: string) => fs.readFileSync(p, 'utf8'));
+  let raw: string;
+  try {
+    raw = readFile(path.join(cwd, '.planning', 'config.json'));
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const git = (parsed as Record<string, unknown>).git;
+  if (!git || typeof git !== 'object' || Array.isArray(git)) return null;
+  const stack = (git as Record<string, unknown>).status_stack;
+  if (!stack || typeof stack !== 'object' || Array.isArray(stack)) return null;
+  const values = stack as Record<string, unknown>;
+  const baseBranch = typeof values.base_branch === 'string' ? values.base_branch.trim() : '';
+  const statusBranch = typeof values.status_branch === 'string' ? values.status_branch.trim() : '';
+  const phaseBranchPrefix = typeof values.phase_branch_prefix === 'string'
+    ? values.phase_branch_prefix.trim()
+    : '';
+  if (!baseBranch || !statusBranch || !phaseBranchPrefix) return null;
+  return { baseBranch, statusBranch, phaseBranchPrefix };
+}
+
+function phaseSortKey(branch: string, prefix: string): number[] | null {
+  const suffix = branch.slice(prefix.length);
+  const match = /^(\d+(?:\.\d+)?)(?:-|$)/.exec(suffix);
+  if (!match) return null;
+  return match[1].split('.').map((part) => Number(part));
+}
+
+function sortPhaseBranches(branches: string[], prefix: string): string[] {
+  return branches
+    .map((branch) => ({ branch, key: phaseSortKey(branch, prefix) }))
+    .filter((entry): entry is { branch: string; key: number[] } => entry.key !== null)
+    .sort((left, right) => {
+      const length = Math.max(left.key.length, right.key.length);
+      for (let index = 0; index < length; index++) {
+        const delta = (left.key[index] ?? 0) - (right.key[index] ?? 0);
+        if (delta !== 0) return delta;
+      }
+      return left.branch.localeCompare(right.branch);
+    })
+    .map((entry) => entry.branch);
+}
+
+function gitSucceeded(result: GitResult | undefined): boolean {
+  return Boolean(result && !result.timedOut && result.exitCode === 0);
+}
+
+/**
+ * Verify the configured base → status → phase/sub-phase ancestry chain.
+ *
+ * This function is deliberately read-only. The manager owns propagation: it
+ * updates gsd-status first, then merges that branch through the listed phase
+ * worktrees. Dispatch guards consume this verdict and refuse new phase work
+ * while the chain is stale.
+ */
+function checkStatusStack(cwd: string, deps: WorktreeDeps = {}): StatusStackResult {
+  const config = parseStatusStackConfig(cwd, deps);
+  const empty: Omit<StatusStackResult, 'configured' | 'verdict' | 'reason'> = {
+    base_branch: null,
+    status_branch: null,
+    phase_branches: [],
+    edges: [],
+    current_branch: null,
+    current_status_branch: null,
+  };
+  if (!config) {
+    return { configured: false, verdict: 'not_configured', reason: 'not_configured', ...empty };
+  }
+
+  const execGit = deps.execGit || execGitDefault;
+  const current = execGit(['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd });
+  const currentBranch = gitSucceeded(current) ? current.stdout.trim() : null;
+  const resultBase = {
+    base_branch: config.baseBranch,
+    status_branch: config.statusBranch,
+    current_branch: currentBranch,
+    current_status_branch: currentBranch === null ? null : currentBranch === config.statusBranch,
+  };
+
+  const names = execGit(['for-each-ref', '--format=%(refname:short)', `refs/heads/${config.phaseBranchPrefix}*`], { cwd });
+  if (names.timedOut || names.exitCode !== 0) {
+    return {
+      configured: true,
+      verdict: 'unavailable',
+      reason: 'phase_branch_list_unavailable',
+      phase_branches: [],
+      edges: [],
+      ...resultBase,
+    };
+  }
+  const phaseBranches = sortPhaseBranches(
+    names.stdout.split('\n').map((line) => line.trim()).filter(Boolean),
+    config.phaseBranchPrefix,
+  );
+
+  const required = [config.baseBranch, config.statusBranch, ...phaseBranches];
+  for (const branch of required) {
+    const exists = execGit(['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { cwd });
+    if (exists.timedOut) {
+      return {
+        configured: true,
+        verdict: 'unavailable',
+        reason: `branch_check_unavailable:${branch}`,
+        phase_branches: phaseBranches,
+        edges: [],
+        ...resultBase,
+      };
+    }
+    if (exists.exitCode !== 0) {
+      return {
+        configured: true,
+        verdict: 'misaligned',
+        reason: `missing_branch:${branch}`,
+        phase_branches: phaseBranches,
+        edges: [],
+        ...resultBase,
+      };
+    }
+  }
+
+  const chain = [config.baseBranch, config.statusBranch, ...phaseBranches];
+  const edges: StatusStackEdge[] = [];
+  for (let index = 1; index < chain.length; index++) {
+    const from = chain[index - 1];
+    const to = chain[index];
+    const ancestor = execGit(['merge-base', '--is-ancestor', from, to], { cwd });
+    if (ancestor.timedOut) {
+      return {
+        configured: true,
+        verdict: 'unavailable',
+        reason: `ancestry_check_unavailable:${from}->${to}`,
+        phase_branches: phaseBranches,
+        edges,
+        ...resultBase,
+      };
+    }
+    const aligned = ancestor.exitCode === 0;
+    edges.push({ from, to, aligned });
+    if (!aligned) {
+      return {
+        configured: true,
+        verdict: 'misaligned',
+        reason: `status_not_propagated:${from}->${to}`,
+        phase_branches: phaseBranches,
+        edges,
+        ...resultBase,
+      };
+    }
+  }
+
+  return {
+    configured: true,
+    verdict: 'aligned',
+    reason: 'aligned',
+    phase_branches: phaseBranches,
+    edges,
+    ...resultBase,
+  };
+}
+
+function cmdWorktreeStatusStack(cwd: string, args: string[] = [], deps: WorktreeDeps = {}): StatusStackResult {
+  const result = checkStatusStack(cwd, deps);
+  const requireStatus = args.includes('--require-status');
+  const ok = result.verdict === 'aligned' ||
+    (requireStatus && result.verdict !== 'not_configured' && result.current_status_branch === true) ||
+    (requireStatus && result.verdict === 'not_configured');
+  process.stdout.write(`${JSON.stringify({ ...result, ok }, null, 2)}\n`);
+  if (!ok) process.exitCode = 2;
+  return result;
+}
+
 interface WorktreeListResult {
   ok: boolean;
   reason: string;
@@ -2137,6 +2359,8 @@ export = {
   resolveWorktreeContext,
   resolveWorktreeLinkage,
   parseWorktreePorcelain,
+  checkStatusStack,
+  cmdWorktreeStatusStack,
   planWorktreePrune,
   executeWorktreePrunePlan,
   listLinkedWorktreePaths,

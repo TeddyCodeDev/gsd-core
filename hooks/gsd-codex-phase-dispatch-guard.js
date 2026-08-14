@@ -80,6 +80,16 @@ function formatBlockReason(phase, result, now = Date.now()) {
   return lines.join('\n');
 }
 
+function formatStatusStackBlockReason(result) {
+  const pending = result.edges
+    .filter((edge) => !edge.aligned)
+    .map((edge) => `${edge.from} -> ${edge.to}`);
+  const suffix = pending.length > 0
+    ? ` Pending propagation: ${pending.join(', ')}.`
+    : '';
+  return `Status-stack guard: ${result.reason}. Update ${result.status_branch} first, then merge it through the configured phase branch chain before dispatching new phase work.${suffix}`;
+}
+
 /**
  * Process Codex's native `spawn_agent` PreToolUse payload without process I/O.
  * `checkPhaseWorktree` is injected by tests; production uses the compiled
@@ -100,6 +110,20 @@ function evaluateCodexDispatch(data, deps = {}) {
 
   const phase = extractPhase(toolInput.message ?? toolInput.prompt ?? toolInput.description);
   if (!phase) return { action: 'allow' };
+
+  const checkStatusStack = deps.checkStatusStack
+    ?? require('../gsd-core/bin/lib/worktree-safety.cjs').checkStatusStack;
+  let stackResult;
+  try {
+    stackResult = checkStatusStack(cwd, {});
+  } catch {
+    // Like the phase preflight, an unreadable local state is not positive
+    // evidence that dispatching would be unsafe.
+    stackResult = null;
+  }
+  if (stackResult?.configured && stackResult.verdict === 'misaligned') {
+    return { action: 'block', reason: formatStatusStackBlockReason(stackResult) };
+  }
 
   const checkPhaseWorktree = deps.checkPhaseWorktree
     ?? require('../gsd-core/bin/lib/phase-preflight.cjs').checkPhaseWorktree;
@@ -140,4 +164,10 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { evaluateCodexDispatch, extractPhase, formatBlockReason, isGsdProject };
+module.exports = {
+  evaluateCodexDispatch,
+  extractPhase,
+  formatBlockReason,
+  formatStatusStackBlockReason,
+  isGsdProject,
+};

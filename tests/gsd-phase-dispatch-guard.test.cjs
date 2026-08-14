@@ -20,7 +20,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 
 const MODULE_PATH = path.join(__dirname, '..', 'hooks', 'gsd-phase-dispatch-guard.js');
-const { evaluateDispatch, isGsdProject, formatBlockReason } = require(MODULE_PATH);
+const { evaluateDispatch, isGsdProject, formatBlockReason, formatStatusStackBlockReason } = require(MODULE_PATH);
 
 function makeTempGsdProject() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-phase-dispatch-guard-'));
@@ -47,6 +47,14 @@ const SAFE_RESULT = {
   verdict: 'safe_to_create',
   matchingWorktrees: [],
   matchingPullRequests: [],
+};
+
+const MISALIGNED_STATUS_STACK = {
+  configured: true,
+  verdict: 'misaligned',
+  reason: 'status_not_propagated:gsd-status->v1.1/phase-09-input-wizard',
+  status_branch: 'gsd-status',
+  edges: [{ from: 'gsd-status', to: 'v1.1/phase-09-input-wizard', aligned: false }],
 };
 
 const NOW = Date.parse('2026-08-11T18:00:00Z');
@@ -131,6 +139,14 @@ describe('formatBlockReason', () => {
   });
 });
 
+describe('formatStatusStackBlockReason', () => {
+  test('names the status branch and the pending stack edge', () => {
+    const reason = formatStatusStackBlockReason(MISALIGNED_STATUS_STACK);
+    assert.match(reason, /gsd-status/);
+    assert.match(reason, /phase-09-input-wizard/);
+  });
+});
+
 // ─── evaluateDispatch ─────────────────────────────────────────────────────────
 
 describe('evaluateDispatch', () => {
@@ -176,6 +192,33 @@ describe('evaluateDispatch', () => {
     const result = evaluateDispatch(
       { tool_name: 'Agent', cwd: dir, tool_input: { subagent_type: 'gsd-executor', description: 'Execute plan 01 of phase 09' } },
       { extractDispatchIdentifiers: EXTRACT_PHASE_08, checkPhaseWorktree: () => SAFE_RESULT }
+    );
+    assert.deepStrictEqual(result, { action: 'allow' });
+  });
+
+  test('BLOCKS when a configured status branch has not been propagated through the phase stack', () => {
+    const dir = makeTempGsdProject();
+    const result = evaluateDispatch(
+      { tool_name: 'Agent', cwd: dir, tool_input: { subagent_type: 'gsd-executor', description: 'Execute plan 01 of phase 09' } },
+      {
+        extractDispatchIdentifiers: EXTRACT_PHASE_08,
+        checkStatusStack: () => MISALIGNED_STATUS_STACK,
+        checkPhaseWorktree: () => SAFE_RESULT,
+      }
+    );
+    assert.strictEqual(result.action, 'block');
+    assert.match(result.reason, /Status-stack guard/);
+  });
+
+  test('allows when the status-stack check is unavailable', () => {
+    const dir = makeTempGsdProject();
+    const result = evaluateDispatch(
+      { tool_name: 'Agent', cwd: dir, tool_input: { subagent_type: 'gsd-executor', description: 'Execute plan 01 of phase 09' } },
+      {
+        extractDispatchIdentifiers: EXTRACT_PHASE_08,
+        checkStatusStack: () => ({ configured: true, verdict: 'unavailable' }),
+        checkPhaseWorktree: () => SAFE_RESULT,
+      }
     );
     assert.deepStrictEqual(result, { action: 'allow' });
   });

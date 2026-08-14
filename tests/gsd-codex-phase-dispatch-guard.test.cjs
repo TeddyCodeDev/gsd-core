@@ -14,7 +14,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const MODULE_PATH = path.join(__dirname, '..', 'hooks', 'gsd-codex-phase-dispatch-guard.js');
-const { evaluateCodexDispatch, extractPhase, formatBlockReason, isGsdProject } = require(MODULE_PATH);
+const { evaluateCodexDispatch, extractPhase, formatBlockReason, formatStatusStackBlockReason, isGsdProject } = require(MODULE_PATH);
 const { ensureCodexHooksJsonScriptEvent } = require('../bin/install.js');
 
 function makeTempGsdProject() {
@@ -41,6 +41,14 @@ const SAFE_RESULT = {
   matchingPullRequests: [],
 };
 
+const MISALIGNED_STATUS_STACK = {
+  configured: true,
+  verdict: 'misaligned',
+  reason: 'status_not_propagated:gsd-status->v1.1/phase-09-input-wizard',
+  status_branch: 'gsd-status',
+  edges: [{ from: 'gsd-status', to: 'v1.1/phase-09-input-wizard', aligned: false }],
+};
+
 const NOW = Date.parse('2026-08-11T18:00:00Z');
 
 function executorPayload(cwd, message = 'Execute plan 01 of phase 08') {
@@ -63,6 +71,12 @@ describe('Codex phase dispatch guard helpers', () => {
     const reason = formatBlockReason('08', EXISTING_WORK_RESULT, NOW);
     assert.match(reason, /pr99-fix/);
     assert.match(reason, /#99/);
+  });
+
+  test('formats the stale status-chain edge needed to unblock dispatch', () => {
+    const reason = formatStatusStackBlockReason(MISALIGNED_STATUS_STACK);
+    assert.match(reason, /gsd-status/);
+    assert.match(reason, /phase-09-input-wizard/);
   });
 
   test('includes a relative-age clause for a worktree with a known lastCommitAt', () => {
@@ -125,6 +139,29 @@ describe('evaluateCodexDispatch', () => {
       checkPhaseWorktree: () => SAFE_RESULT,
     });
     assert.deepStrictEqual(result, { action: 'allow' });
+  });
+
+  test('BLOCKS when a configured status branch has not been propagated through the phase stack', () => {
+    const result = evaluateCodexDispatch(executorPayload(makeTempGsdProject()), {
+      checkStatusStack: () => MISALIGNED_STATUS_STACK,
+      checkPhaseWorktree: () => SAFE_RESULT,
+    });
+    assert.strictEqual(result.action, 'block');
+    assert.match(result.reason, /Status-stack guard/);
+    assert.match(result.reason, /gsd-status/);
+  });
+
+  test('allows an unavailable or unconfigured status-stack check', () => {
+    const unavailable = evaluateCodexDispatch(executorPayload(makeTempGsdProject()), {
+      checkStatusStack: () => ({ configured: true, verdict: 'unavailable' }),
+      checkPhaseWorktree: () => SAFE_RESULT,
+    });
+    const notConfigured = evaluateCodexDispatch(executorPayload(makeTempGsdProject()), {
+      checkStatusStack: () => ({ configured: false, verdict: 'not_configured' }),
+      checkPhaseWorktree: () => SAFE_RESULT,
+    });
+    assert.deepStrictEqual(unavailable, { action: 'allow' });
+    assert.deepStrictEqual(notConfigured, { action: 'allow' });
   });
 
   test('fails open when the preflight check throws', () => {

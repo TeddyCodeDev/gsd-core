@@ -2275,8 +2275,10 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             worktreeSafety.cmdWorktreeCreate(cwd, args.slice(2));
           } else if (subcommand === 'phase-preflight') {
             require('./lib/phase-preflight.cjs').cmdPhasePreflight(cwd, args.slice(2));
+          } else if (subcommand === 'status-stack') {
+            worktreeSafety.cmdWorktreeStatusStack(cwd, args.slice(2));
           } else {
-            error('Unknown worktree subcommand. Available: cleanup-wave, record-agent, reap-orphans, base-check, set-baseref, create, phase-preflight', ERROR_REASON.SDK_UNKNOWN_COMMAND);
+            error('Unknown worktree subcommand. Available: cleanup-wave, record-agent, reap-orphans, base-check, set-baseref, create, phase-preflight, status-stack', ERROR_REASON.SDK_UNKNOWN_COMMAND);
           }
   }
 
@@ -4252,4 +4254,3 @@ module.exports = {
   skipsRootResolution,
   resolveMainWorktreeCwd,
 };
-

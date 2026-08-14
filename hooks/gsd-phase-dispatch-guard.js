@@ -123,6 +123,16 @@ function formatBlockReason(phase, result, now = Date.now()) {
   return lines.join('\n');
 }
 
+function formatStatusStackBlockReason(result) {
+  const pending = result.edges
+    .filter((edge) => !edge.aligned)
+    .map((edge) => `${edge.from} -> ${edge.to}`);
+  const suffix = pending.length > 0
+    ? ` Pending propagation: ${pending.join(', ')}.`
+    : '';
+  return `Status-stack guard: ${result.reason}. Update ${result.status_branch} first, then merge it through the configured phase branch chain before dispatching new phase work.${suffix}`;
+}
+
 /**
  * Process one PreToolUse payload (already JSON-parsed) and return the decision
  * without touching stdin/stdout/process.exit — the directly-testable core of this
@@ -150,6 +160,20 @@ function evaluateDispatch(data, deps = {}) {
     ?? require('./lib/isolation-sentinel.js').extractDispatchIdentifiers;
   const { phase } = extractDispatchIdentifiers(toolInput.description ?? toolInput.prompt);
   if (!phase) return { action: 'allow' };
+
+  const checkStatusStack = deps.checkStatusStack
+    ?? require('../gsd-core/bin/lib/worktree-safety.cjs').checkStatusStack;
+  let stackResult;
+  try {
+    stackResult = checkStatusStack(cwd, {});
+  } catch {
+    // The phase-dispatch guard is intentionally fail-open for unavailable
+    // environmental checks; only a confirmed stale status chain blocks work.
+    stackResult = null;
+  }
+  if (stackResult?.configured && stackResult.verdict === 'misaligned') {
+    return { action: 'block', reason: formatStatusStackBlockReason(stackResult) };
+  }
 
   const checkPhaseWorktree = deps.checkPhaseWorktree
     ?? require('../gsd-core/bin/lib/phase-preflight.cjs').checkPhaseWorktree;
@@ -205,4 +229,5 @@ module.exports = {
   evaluateDispatch,
   isGsdProject,
   formatBlockReason,
+  formatStatusStackBlockReason,
 };

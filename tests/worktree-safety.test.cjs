@@ -53,6 +53,7 @@ const {
   planWorktreeCreate,
   executeWorktreeCreatePlan,
   cmdWorktreeCreate,
+  checkStatusStack,
 } = require(WORKTREE_SAFETY_PATH);
 
 const isWindows = process.platform === 'win32';
@@ -81,6 +82,82 @@ function makeTimeoutStub() {
     };
   };
 }
+
+function stackGitResult(exitCode = 0, stdout = '') {
+  return { exitCode, stdout, stderr: '', timedOut: false };
+}
+
+describe('checkStatusStack', () => {
+  const config = JSON.stringify({
+    git: {
+      status_stack: {
+        base_branch: 'develop',
+        status_branch: 'gsd-status',
+        phase_branch_prefix: 'v1.1/phase-',
+      },
+    },
+  });
+
+  test('accepts a numeric base-to-subphase ancestry chain', () => {
+    const result = checkStatusStack('/repo', {
+      readFileSync: () => config,
+      execGit: (args) => {
+        if (args[0] === 'symbolic-ref') return stackGitResult(0, 'v1.1/phase-09.1-wizard-shell\n');
+        if (args[0] === 'for-each-ref') {
+          assert.strictEqual(args[2], 'refs/heads/v1.1/phase-*');
+          return stackGitResult(0, 'v1.1/phase-09.1-wizard-shell\nv1.1/phase-09-input-wizard\n');
+        }
+        if (args[0] === 'show-ref') return stackGitResult();
+        if (args[0] === 'merge-base') return stackGitResult();
+        return stackGitResult(1);
+      },
+    });
+    assert.strictEqual(result.verdict, 'aligned');
+    assert.deepStrictEqual(result.phase_branches, [
+      'v1.1/phase-09-input-wizard',
+      'v1.1/phase-09.1-wizard-shell',
+    ]);
+    assert.strictEqual(result.current_status_branch, false);
+  });
+
+  test('reports the first status snapshot that has not been pulled through the stack', () => {
+    const result = checkStatusStack('/repo', {
+      readFileSync: () => config,
+      execGit: (args) => {
+        if (args[0] === 'symbolic-ref') return stackGitResult(0, 'gsd-status\n');
+        if (args[0] === 'for-each-ref') {
+          assert.strictEqual(args[2], 'refs/heads/v1.1/phase-*');
+          return stackGitResult(0, 'v1.1/phase-09-input-wizard\n');
+        }
+        if (args[0] === 'show-ref') return stackGitResult();
+        if (args[0] === 'merge-base') {
+          return args[2] === 'develop' && args[3] === 'gsd-status'
+            ? stackGitResult()
+            : stackGitResult(1);
+        }
+        return stackGitResult(1);
+      },
+    });
+    assert.strictEqual(result.verdict, 'misaligned');
+    assert.strictEqual(result.reason, 'status_not_propagated:gsd-status->v1.1/phase-09-input-wizard');
+    assert.strictEqual(result.current_status_branch, true);
+  });
+
+  test('is inert when a project does not opt into a status stack', () => {
+    const result = checkStatusStack('/repo', { readFileSync: () => '{}' });
+    assert.deepStrictEqual(result, {
+      configured: false,
+      verdict: 'not_configured',
+      reason: 'not_configured',
+      base_branch: null,
+      status_branch: null,
+      phase_branches: [],
+      edges: [],
+      current_branch: null,
+      current_status_branch: null,
+    });
+  });
+});
 
 // ─── resolveWorktreeContext ───────────────────────────────────────────────────
 
