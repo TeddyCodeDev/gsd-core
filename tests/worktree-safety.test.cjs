@@ -94,6 +94,7 @@ describe('checkStatusStack', () => {
         base_branch: 'develop',
         status_branch: 'gsd-status',
         phase_branch_prefix: 'v1.1/phase-',
+        dashboard_paths: ['.planning/STATE.md', '.planning/ROADMAP.md'],
       },
     },
   });
@@ -109,6 +110,7 @@ describe('checkStatusStack', () => {
         }
         if (args[0] === 'show-ref') return stackGitResult();
         if (args[0] === 'merge-base') return stackGitResult();
+        if (args[0] === 'diff') return stackGitResult();
         return stackGitResult(1);
       },
     });
@@ -135,6 +137,7 @@ describe('checkStatusStack', () => {
             ? stackGitResult()
             : stackGitResult(1);
         }
+        if (args[0] === 'diff') return stackGitResult();
         return stackGitResult(1);
       },
     });
@@ -152,10 +155,32 @@ describe('checkStatusStack', () => {
       base_branch: null,
       status_branch: null,
       phase_branches: [],
+      dashboard_paths: [],
       edges: [],
       current_branch: null,
       current_status_branch: null,
     });
+  });
+
+  test('rejects dashboard metadata edited directly on a phase branch', () => {
+    const result = checkStatusStack('/repo', {
+      readFileSync: () => config,
+      execGit: (args) => {
+        if (args[0] === 'symbolic-ref') return stackGitResult(0, 'v1.1/phase-09-input-wizard\n');
+        if (args[0] === 'for-each-ref') return stackGitResult(0, 'v1.1/phase-09-input-wizard\n');
+        if (args[0] === 'show-ref' || args[0] === 'merge-base') return stackGitResult();
+        if (args[0] === 'diff') {
+          assert.deepStrictEqual(args.slice(1), [
+            '--quiet', 'gsd-status', 'v1.1/phase-09-input-wizard', '--',
+            '.planning/STATE.md', '.planning/ROADMAP.md',
+          ]);
+          return stackGitResult(1);
+        }
+        return stackGitResult(1);
+      },
+    });
+    assert.strictEqual(result.verdict, 'misaligned');
+    assert.strictEqual(result.reason, 'dashboard_not_synced:gsd-status->v1.1/phase-09-input-wizard');
   });
 });
 

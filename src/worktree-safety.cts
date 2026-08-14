@@ -88,7 +88,8 @@ function parseWorktreeListPaths(porcelain: string): string[] {
 //     "status_stack": {
 //       "base_branch": "develop",
 //       "status_branch": "gsd-status",
-//       "phase_branch_prefix": "v1.1/phase-"
+//       "phase_branch_prefix": "v1.1/phase-",
+//       "dashboard_paths": [".planning/STATE.md", ".planning/ROADMAP.md"]
 //     }
 //   }
 // }
@@ -102,6 +103,7 @@ interface StatusStackConfig {
   baseBranch: string;
   statusBranch: string;
   phaseBranchPrefix: string;
+  dashboardPaths: string[];
 }
 
 interface StatusStackEdge {
@@ -117,6 +119,7 @@ interface StatusStackResult {
   base_branch: string | null;
   status_branch: string | null;
   phase_branches: string[];
+  dashboard_paths: string[];
   edges: StatusStackEdge[];
   current_branch: string | null;
   current_status_branch: boolean | null;
@@ -147,8 +150,14 @@ function parseStatusStackConfig(cwd: string, deps: WorktreeDeps = {}): StatusSta
   const phaseBranchPrefix = typeof values.phase_branch_prefix === 'string'
     ? values.phase_branch_prefix.trim()
     : '';
+  const dashboardPaths = Array.isArray(values.dashboard_paths)
+    ? values.dashboard_paths
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+    : [];
   if (!baseBranch || !statusBranch || !phaseBranchPrefix) return null;
-  return { baseBranch, statusBranch, phaseBranchPrefix };
+  return { baseBranch, statusBranch, phaseBranchPrefix, dashboardPaths };
 }
 
 function phaseSortKey(branch: string, prefix: string): number[] | null {
@@ -191,6 +200,7 @@ function checkStatusStack(cwd: string, deps: WorktreeDeps = {}): StatusStackResu
     base_branch: null,
     status_branch: null,
     phase_branches: [],
+    dashboard_paths: [],
     edges: [],
     current_branch: null,
     current_status_branch: null,
@@ -205,6 +215,7 @@ function checkStatusStack(cwd: string, deps: WorktreeDeps = {}): StatusStackResu
   const resultBase = {
     base_branch: config.baseBranch,
     status_branch: config.statusBranch,
+    dashboard_paths: config.dashboardPaths,
     current_branch: currentBranch,
     current_status_branch: currentBranch === null ? null : currentBranch === config.statusBranch,
   };
@@ -273,6 +284,38 @@ function checkStatusStack(cwd: string, deps: WorktreeDeps = {}): StatusStackResu
         configured: true,
         verdict: 'misaligned',
         reason: `status_not_propagated:${from}->${to}`,
+        phase_branches: phaseBranches,
+        edges,
+        ...resultBase,
+      };
+    }
+  }
+
+  // A phase branch can still contain gsd-status in its history after someone
+  // edits dashboard metadata locally. When dashboard_paths is configured,
+  // require those files to be byte-identical to the status branch as well.
+  // That makes the branch topology a content invariant, not just ancestry.
+  for (const phaseBranch of phaseBranches) {
+    if (config.dashboardPaths.length === 0) break;
+    const dashboard = execGit(
+      ['diff', '--quiet', config.statusBranch, phaseBranch, '--', ...config.dashboardPaths],
+      { cwd },
+    );
+    if (dashboard.timedOut) {
+      return {
+        configured: true,
+        verdict: 'unavailable',
+        reason: `dashboard_check_unavailable:${config.statusBranch}->${phaseBranch}`,
+        phase_branches: phaseBranches,
+        edges,
+        ...resultBase,
+      };
+    }
+    if (dashboard.exitCode !== 0) {
+      return {
+        configured: true,
+        verdict: 'misaligned',
+        reason: `dashboard_not_synced:${config.statusBranch}->${phaseBranch}`,
         phase_branches: phaseBranches,
         edges,
         ...resultBase,
