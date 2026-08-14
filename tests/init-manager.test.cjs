@@ -6,7 +6,14 @@ const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 const { runGsdTools, createTempProject, cleanup } = require('./helpers.cjs');
+
+const GIT_TIMEOUT_MS = 30_000;
+
+function runGit(cwd, args) {
+  return execFileSync('git', args, { cwd, timeout: GIT_TIMEOUT_MS });
+}
 
 // Helper: write a minimal ROADMAP.md with phases
 function writeRoadmap(tmpDir, phases) {
@@ -136,6 +143,51 @@ describe('init manager', () => {
     assert.strictEqual(output.phases[2].disk_status, 'discussed');
     assert.strictEqual(output.phases[3].disk_status, 'empty');
     assert.strictEqual(output.phases[4].disk_status, 'no_directory');
+  });
+
+  test('projects aligned status-stack phase artifacts into the status-branch dashboard', () => {
+    writeState(tmpDir);
+    writeRoadmap(tmpDir, [{ number: '1', name: 'Foundation' }]);
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'config.json'),
+      JSON.stringify({
+        git: {
+          status_stack: {
+            base_branch: 'develop',
+            status_branch: 'gsd-status',
+            phase_branch_prefix: 'v1.1/phase-',
+            dashboard_paths: ['.planning/STATE.md', '.planning/ROADMAP.md'],
+          },
+        },
+      }),
+    );
+    runGit(tmpDir, ['init', '-b', 'develop']);
+    runGit(tmpDir, ['config', 'user.email', 'tests@example.com']);
+    runGit(tmpDir, ['config', 'user.name', 'GSD Tests']);
+    runGit(tmpDir, ['add', '.']);
+    runGit(tmpDir, ['commit', '-m', 'Initialize status stack fixture']);
+    runGit(tmpDir, ['branch', 'gsd-status']);
+
+    const phaseWorktree = `${tmpDir}-phase-01`;
+    let worktreeCreated = false;
+    try {
+      runGit(tmpDir, ['worktree', 'add', '-b', 'v1.1/phase-01-foundation', phaseWorktree]);
+      worktreeCreated = true;
+      scaffoldPhase(phaseWorktree, 1, { slug: 'foundation', context: true, plans: 1 });
+      runGit(phaseWorktree, ['add', '.planning/phases']);
+      runGit(phaseWorktree, ['commit', '-m', 'Add phase plan']);
+      runGit(tmpDir, ['checkout', 'gsd-status']);
+
+      const result = runGsdTools('init manager', tmpDir);
+      assert.ok(result.success, `Command failed: ${result.error}`);
+      const phase = JSON.parse(result.output).phases[0];
+      assert.strictEqual(phase.disk_status, 'planned');
+      assert.strictEqual(phase.plan_count, 1);
+      assert.strictEqual(phase.status_source, 'status_stack_worktree');
+      assert.strictEqual(fs.realpathSync(phase.status_worktree), fs.realpathSync(phaseWorktree));
+    } finally {
+      if (worktreeCreated) runGit(tmpDir, ['worktree', 'remove', '--force', phaseWorktree]);
+    }
   });
 
   test('treats plans/PLAN-NN.md layout as planned/complete counts (#3053)', () => {

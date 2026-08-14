@@ -89,7 +89,7 @@ const {
 } = roadmapParser;
 const { pathExistsInternal, generateSlugInternal, toPosixPath } = coreUtils;
 const { escapeRegex, normalizePhaseName, matchPhaseDirs, stripProjectCodePrefix, PHASE_NUMBER_TOKEN_SOURCE, isForeignPrefixedPhaseQuery, isSentinelPhaseId } = phaseId;
-const { pruneOrphanedWorktrees } = worktreeSafety;
+const { pruneOrphanedWorktrees, checkStatusStack, parseWorktreePorcelain } = worktreeSafety;
 
 const {
   planningPaths,
@@ -298,6 +298,161 @@ function buildPhaseCompletionProjection(
     verification_stale_check_indeterminate: 'staleCheckIndeterminate' in verificationStatus
       && verificationStatus.staleCheckIndeterminate === true,
   };
+}
+
+interface ManagerPhaseDiskSnapshot {
+  diskStatus: string;
+  planCount: number;
+  summaryCount: number;
+  hasContext: boolean;
+  hasResearch: boolean;
+  lastActivity: string | null;
+  isActive: boolean;
+  completion: PhaseCompletionProjection;
+  hasDirectory: boolean;
+}
+
+interface StatusStackDashboardSource {
+  path: string;
+  branch: string;
+}
+
+/**
+ * Read the artifact-derived status for one roadmap phase from a single worktree.
+ *
+ * The manager normally reads its own checkout. A status-stack checkout is different:
+ * it deliberately keeps STATE.md/ROADMAP.md identical to every phase branch, while
+ * the phase artifacts themselves live only on the newest linked phase worktree.
+ * Keeping this read-only projection here makes the status branch useful as a dashboard
+ * without treating a roadmap checkbox or copied metadata as completion evidence.
+ */
+function readManagerPhaseDiskSnapshot(
+  sourceCwd: string,
+  phaseNum: string,
+  normalizedPhaseNum: string,
+  slashRuntime: string,
+): ManagerPhaseDiskSnapshot {
+  let diskStatus = 'no_directory';
+  let planCount = 0;
+  let summaryCount = 0;
+  let hasContext = false;
+  let hasResearch = false;
+  let lastActivity: string | null = null;
+  let isActive = false;
+  let completion = buildPhaseCompletionProjection(
+    sourceCwd,
+    phaseNum,
+    null,
+    planCount,
+    summaryCount,
+    slashRuntime,
+  );
+
+  try {
+    const sourcePaths = planningPaths(sourceCwd);
+    const phaseDirs = listMilestonePhaseDirs(sourcePaths.phases, { cwd: sourceCwd }).value;
+    const dirMatch = matchPhaseDirs(phaseDirs, normalizedPhaseNum).matches[0];
+    if (!dirMatch) {
+      return {
+        diskStatus,
+        planCount,
+        summaryCount,
+        hasContext,
+        hasResearch,
+        lastActivity,
+        isActive,
+        completion,
+        hasDirectory: false,
+      };
+    }
+
+    const fullDir = path.join(sourcePaths.phases, dirMatch);
+    const phaseDirRel = toPosixPath(path.relative(sourceCwd, fullDir));
+    const phaseFiles = fs.readdirSync(fullDir);
+    planCount = listPhasePlanFiles(fullDir).length;
+    summaryCount = listPhaseSummaryFiles(fullDir).length;
+    hasContext = findContextMdIn(fullDir) !== null;
+    hasResearch = phaseFiles.some((f) => f.endsWith('-RESEARCH.md') || f === 'RESEARCH.md');
+    completion = buildPhaseCompletionProjection(
+      sourceCwd,
+      phaseNum,
+      phaseDirRel,
+      planCount,
+      summaryCount,
+      slashRuntime,
+    );
+
+    if (completion.phase_complete) diskStatus = 'complete';
+    else if (completion.implementation_complete) diskStatus = 'executed';
+    else if (summaryCount > 0) diskStatus = 'partial';
+    else if (planCount > 0) diskStatus = 'planned';
+    else if (hasResearch) diskStatus = 'researched';
+    else if (hasContext) diskStatus = 'discussed';
+    else diskStatus = 'empty';
+
+    let newestMtime = 0;
+    for (const file of phaseFiles) {
+      try {
+        const stat = fs.statSync(path.join(fullDir, file));
+        if (stat.mtimeMs > newestMtime) newestMtime = stat.mtimeMs;
+      } catch {
+        /* intentionally empty */
+      }
+    }
+    if (newestMtime > 0) {
+      lastActivity = new Date(newestMtime).toISOString();
+      isActive = realClock.now() - newestMtime < 300000;
+    }
+
+    return {
+      diskStatus,
+      planCount,
+      summaryCount,
+      hasContext,
+      hasResearch,
+      lastActivity,
+      isActive,
+      completion,
+      hasDirectory: true,
+    };
+  } catch {
+    return {
+      diskStatus,
+      planCount,
+      summaryCount,
+      hasContext,
+      hasResearch,
+      lastActivity,
+      isActive,
+      completion,
+      hasDirectory: false,
+    };
+  }
+}
+
+/**
+ * The final phase branch in an aligned stack contains every predecessor's
+ * artifacts. Only project its state while the manager is running on the
+ * configured status branch; phase worktrees retain their normal local view.
+ */
+function resolveStatusStackDashboardSource(cwd: string): StatusStackDashboardSource | null {
+  try {
+    const stack = checkStatusStack(cwd) as unknown as Record<string, unknown>;
+    if (stack['verdict'] !== 'aligned' || stack['current_status_branch'] !== true) return null;
+    if (!Array.isArray(stack['phase_branches']) || stack['phase_branches'].length === 0) return null;
+    const phaseBranches: readonly unknown[] = stack['phase_branches'] as unknown[];
+    const branch = phaseBranches[phaseBranches.length - 1];
+    if (typeof branch !== 'string' || !branch) return null;
+
+    const worktrees = execGit(['worktree', 'list', '--porcelain'], { cwd });
+    if (worktrees.timedOut || worktrees.exitCode !== 0) return null;
+    const worktree = (parseWorktreePorcelain(worktrees.stdout) as Array<{ path: string; branch: string }>)
+      .find((entry) => entry.branch === branch);
+    if (!worktree || !fs.existsSync(path.join(worktree.path, '.planning', 'phases'))) return null;
+    return worktree;
+  } catch {
+    return null;
+  }
 }
 
 function getLatestCompletedMilestone(cwd: string): { version: string; name: string } | null {
@@ -2187,14 +2342,7 @@ function cmdInitManager(cwd: string, raw: boolean): void {
   }
   const rawContent = fs.readFileSync(paths.roadmap, 'utf-8');
   const content = extractCurrentMilestone(rawContent, cwd);
-  const phasesDir = paths.phases;
-
-  // #3185 (ADR-3180 Decision 1): "which phase directories belong to the
-  // CURRENT milestone" is the scoped question listMilestonePhaseDirs owns —
-  // routed through it instead of a hand-rolled readdirSync + a separate
-  // getMilestonePhaseFilter window check (which also never excluded
-  // sentinels, unlike the owner).
-  const _phaseDirEntries = listMilestonePhaseDirs(phasesDir, { cwd }).value;
+  const statusStackDashboardSource = resolveStatusStackDashboardSource(cwd);
 
   const _checkboxStates = new Map<string, boolean>();
   const _cbPattern = new RegExp(`-\\s*\\[(x| )\\]\\s*.*Phase\\s+(${PHASE_NUMBER_TOKEN_SOURCE})[:\\s]`, 'gi');
@@ -2227,74 +2375,36 @@ function cmdInitManager(cwd: string, raw: boolean): void {
     const depends_on = dependsMatch ? dependsMatch[1].trim() : null;
 
     const normalized = normalizePhaseName(phaseNum);
-    let diskStatus = 'no_directory';
-    let planCount = 0;
-    let summaryCount = 0;
-    let hasContext = false;
-    let hasResearch = false;
-    let lastActivity: string | null = null;
-    let isActive = false;
-    let completion = buildPhaseCompletionProjection(
-      cwd,
-      phaseNum,
-      null,
+    // #3185 (ADR-3180 Decision 2): this remains a physical artifact lookup,
+    // now factored so a configured status-stack dashboard can safely project
+    // the same canonical evidence from its newest aligned phase worktree.
+    let snapshot = readManagerPhaseDiskSnapshot(cwd, phaseNum, normalized, _slashRuntime);
+    let statusSource = 'current_worktree';
+    let statusWorktree: string | null = null;
+    if (statusStackDashboardSource) {
+      const stackedSnapshot = readManagerPhaseDiskSnapshot(
+        statusStackDashboardSource.path,
+        phaseNum,
+        normalized,
+        _slashRuntime,
+      );
+      if (stackedSnapshot.hasDirectory) {
+        snapshot = stackedSnapshot;
+        statusSource = 'status_stack_worktree';
+        statusWorktree = statusStackDashboardSource.path;
+      }
+    }
+
+    const {
+      diskStatus,
       planCount,
       summaryCount,
-      _slashRuntime,
-    );
-
-    try {
-      // #3185 (ADR-3180 Decision 2) moved this lookup off the
-      // milestone-scoped set and onto the physical one; that scope choice is
-      // kept. Only the matcher is this PR's: matchPhaseDirs resolves
-      // digit-leading directory names the token predicate cannot (#2528).
-      const dirMatch = matchPhaseDirs(_phaseDirEntries, normalized).matches[0];
-
-      if (dirMatch) {
-        const fullDir = path.join(phasesDir, dirMatch);
-        const phaseDirRel = toPosixPath(path.relative(cwd, fullDir));
-        const phaseFiles = fs.readdirSync(fullDir);
-        planCount = listPhasePlanFiles(fullDir).length;
-        summaryCount = listPhaseSummaryFiles(fullDir).length;
-        hasContext = findContextMdIn(fullDir) !== null;
-        hasResearch = phaseFiles.some(
-          (f) => f.endsWith('-RESEARCH.md') || f === 'RESEARCH.md',
-        );
-        completion = buildPhaseCompletionProjection(
-          cwd,
-          phaseNum,
-          phaseDirRel,
-          planCount,
-          summaryCount,
-          _slashRuntime,
-        );
-
-        if (completion.phase_complete) diskStatus = 'complete';
-        else if (completion.implementation_complete) diskStatus = 'executed';
-        else if (summaryCount > 0) diskStatus = 'partial';
-        else if (planCount > 0) diskStatus = 'planned';
-        else if (hasResearch) diskStatus = 'researched';
-        else if (hasContext) diskStatus = 'discussed';
-        else diskStatus = 'empty';
-
-        const nowMs = realClock.now();
-        let newestMtime = 0;
-        for (const f of phaseFiles) {
-          try {
-            const stat = fs.statSync(path.join(fullDir, f));
-            if (stat.mtimeMs > newestMtime) newestMtime = stat.mtimeMs;
-          } catch {
-            /* intentionally empty */
-          }
-        }
-        if (newestMtime > 0) {
-          lastActivity = new Date(newestMtime).toISOString();
-          isActive = nowMs - newestMtime < 300000;
-        }
-      }
-    } catch {
-      /* intentionally empty */
-    }
+      hasContext,
+      hasResearch,
+      lastActivity,
+      isActive,
+      completion,
+    } = snapshot;
 
     // ADR-3180 §7.4 (disk-strict, #2957, maintainer decision 2026-08-08):
     // `roadmapComplete` is reported below as metadata only — it carries NO
@@ -2325,6 +2435,8 @@ function cmdInitManager(cwd: string, raw: boolean): void {
       ...completion,
       last_activity: lastActivity,
       is_active: isActive,
+      status_source: statusSource,
+      status_worktree: statusWorktree,
     });
   }
 
