@@ -95,9 +95,9 @@ function parseWorktreeListPaths(porcelain: string): string[] {
 // }
 //
 // The status branch is the authoritative metadata snapshot. Phase branches are
-// discovered from the prefix, sorted by their numeric phase component, and must
-// form an ancestry chain after the status branch. A fresh status commit therefore
-// makes the check fail until it is merged through every phase branch.
+// discovered from the prefix, sorted by their numeric phase component, and each
+// independently receives the status snapshot. They are peers, not a serial
+// ancestry chain: a phase's application changes stay isolated to its own branch.
 
 interface StatusStackConfig {
   baseBranch: string;
@@ -162,7 +162,7 @@ function parseStatusStackConfig(cwd: string, deps: WorktreeDeps = {}): StatusSta
 
 function phaseSortKey(branch: string, prefix: string): number[] | null {
   const suffix = branch.slice(prefix.length);
-  const match = /^(\d+(?:\.\d+)?)(?:-|$)/.exec(suffix);
+  const match = /^(\d+(?:\.\d+)*)(?:-|$)/.exec(suffix);
   if (!match) return null;
   return match[1].split('.').map((part) => Number(part));
 }
@@ -187,12 +187,13 @@ function gitSucceeded(result: GitResult | undefined): boolean {
 }
 
 /**
- * Verify the configured base → status → phase/sub-phase ancestry chain.
+ * Verify the configured base → status hub-and-spoke topology.
  *
  * This function is deliberately read-only. The manager owns propagation: it
- * updates gsd-status first, then merges that branch through the listed phase
- * worktrees. Dispatch guards consume this verdict and refuse new phase work
- * while the chain is stale.
+ * updates gsd-status first, then merges that branch into each listed phase
+ * worktree. Dispatch guards consume this verdict and refuse new phase work
+ * while a phase is stale. Phase branches are deliberately never compared to
+ * one another: they contain different application work.
  */
 function checkStatusStack(cwd: string, deps: WorktreeDeps = {}): StatusStackResult {
   const config = parseStatusStackConfig(cwd, deps);
@@ -261,11 +262,12 @@ function checkStatusStack(cwd: string, deps: WorktreeDeps = {}): StatusStackResu
     }
   }
 
-  const chain = [config.baseBranch, config.statusBranch, ...phaseBranches];
+  const edgesToCheck = [
+    { from: config.baseBranch, to: config.statusBranch },
+    ...phaseBranches.map((phaseBranch) => ({ from: config.statusBranch, to: phaseBranch })),
+  ];
   const edges: StatusStackEdge[] = [];
-  for (let index = 1; index < chain.length; index++) {
-    const from = chain[index - 1];
-    const to = chain[index];
+  for (const { from, to } of edgesToCheck) {
     const ancestor = execGit(['merge-base', '--is-ancestor', from, to], { cwd });
     if (ancestor.timedOut) {
       return {

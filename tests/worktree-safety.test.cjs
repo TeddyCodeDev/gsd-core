@@ -99,7 +99,7 @@ describe('checkStatusStack', () => {
     },
   });
 
-  test('accepts a numeric base-to-subphase ancestry chain', () => {
+  test('accepts a status hub with multi-part phase branch identifiers', () => {
     const result = checkStatusStack('/repo', {
       readFileSync: () => config,
       execGit: (args) => {
@@ -109,7 +109,15 @@ describe('checkStatusStack', () => {
           return stackGitResult(0, 'v1.1/phase-09.1-wizard-shell\nv1.1/phase-09-input-wizard\n');
         }
         if (args[0] === 'show-ref') return stackGitResult();
-        if (args[0] === 'merge-base') return stackGitResult();
+        if (args[0] === 'merge-base') {
+          const edge = `${args[2]}->${args[3]}`;
+          assert.ok([
+            'develop->gsd-status',
+            'gsd-status->v1.1/phase-09-input-wizard',
+            'gsd-status->v1.1/phase-09.1-wizard-shell',
+          ].includes(edge), `unexpected serial phase edge: ${edge}`);
+          return stackGitResult();
+        }
         if (args[0] === 'diff') return stackGitResult();
         return stackGitResult(1);
       },
@@ -122,7 +130,7 @@ describe('checkStatusStack', () => {
     assert.strictEqual(result.current_status_branch, false);
   });
 
-  test('reports the first status snapshot that has not been pulled through the stack', () => {
+  test('reports a phase that has not received the status snapshot', () => {
     const result = checkStatusStack('/repo', {
       readFileSync: () => config,
       execGit: (args) => {
@@ -181,6 +189,44 @@ describe('checkStatusStack', () => {
     });
     assert.strictEqual(result.verdict, 'misaligned');
     assert.strictEqual(result.reason, 'dashboard_not_synced:gsd-status->v1.1/phase-09-input-wizard');
+  });
+
+  test('does not require one phase branch to contain another phase branch', () => {
+    const result = checkStatusStack('/repo', {
+      readFileSync: () => config,
+      execGit: (args) => {
+        if (args[0] === 'symbolic-ref') return stackGitResult(0, 'gsd-status\n');
+        if (args[0] === 'for-each-ref') {
+          return stackGitResult(0, [
+            'v1.1/phase-09.1-wizard-shell',
+            'v1.1/phase-09.5-mobile-snapshot',
+            'v1.1/phase-09.6.1-onboarding-polish',
+          ].join('\n'));
+        }
+        if (args[0] === 'show-ref' || args[0] === 'diff') return stackGitResult();
+        if (args[0] === 'merge-base') {
+          if (args[2] === 'develop') {
+            assert.strictEqual(args[3], 'gsd-status');
+          } else {
+            assert.strictEqual(args[2], 'gsd-status');
+          }
+          return stackGitResult();
+        }
+        return stackGitResult(1);
+      },
+    });
+    assert.strictEqual(result.verdict, 'aligned');
+    assert.deepStrictEqual(result.phase_branches, [
+      'v1.1/phase-09.1-wizard-shell',
+      'v1.1/phase-09.5-mobile-snapshot',
+      'v1.1/phase-09.6.1-onboarding-polish',
+    ]);
+    assert.deepStrictEqual(result.edges, [
+      { from: 'develop', to: 'gsd-status', aligned: true },
+      { from: 'gsd-status', to: 'v1.1/phase-09.1-wizard-shell', aligned: true },
+      { from: 'gsd-status', to: 'v1.1/phase-09.5-mobile-snapshot', aligned: true },
+      { from: 'gsd-status', to: 'v1.1/phase-09.6.1-onboarding-polish', aligned: true },
+    ]);
   });
 });
 
