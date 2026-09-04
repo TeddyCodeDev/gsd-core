@@ -315,8 +315,31 @@ else
   # Pinned base (#2916); --no-track (#2498). #2639: warn if local ahead of origin.
   AHEAD=$(git rev-list --count "origin/$DEFAULT_BRANCH..$DEFAULT_BRANCH" 2>/dev/null || echo 0)
   [ "$AHEAD" != "0" ] && [ -n "$AHEAD" ] && echo "WARNING: $DEFAULT_BRANCH is $AHEAD ahead of origin — '$BRANCH_NAME' won't include those commits (#2639)." >&2
-  git checkout -b "$BRANCH_NAME" "origin/$DEFAULT_BRANCH" --no-track \
-    || { echo "ERROR: Could not create '$BRANCH_NAME' from origin/$DEFAULT_BRANCH (#2916)." >&2; exit 1; }
+
+  # Dependent-phase stacking: if this phase's ROADMAP `Depends on:` names exactly
+  # one phase whose branch is pushed to origin but not yet merged into
+  # $DEFAULT_BRANCH, fork from that branch instead — otherwise this phase's
+  # execute step never has its dependency's code until that dependency's PR
+  # merges, independent of whether ROADMAP already marks the dependency phase
+  # complete (deps_satisfied is checkbox-based, not merge-based, by design — see
+  # .plans/dependent-phase-branch-stacking.md). Still always a fetched, verified
+  # origin/* ref, never local HEAD — preserves #2916's guarantee. Any ambiguity
+  # (no match, multiple unmerged deps, unpushed branch) falls back to
+  # $DEFAULT_BRANCH unchanged.
+  FORK_BASE="origin/$DEFAULT_BRANCH"
+  STACK_RESULT=$(gsd_run query worktree stack-base "$phase_number" "$DEFAULT_BRANCH" 2>/dev/null)
+  STACK_BASE=$(printf '%s' "$STACK_RESULT" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(d);process.stdout.write(j.stackBase||"")}catch{}})' 2>/dev/null)
+  if [ -n "$STACK_BASE" ]; then
+    DEP_BRANCH=$(printf '%s' "$STACK_RESULT" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(d);process.stdout.write(j.dependencyBranch||"")}catch{}})' 2>/dev/null)
+    DEP_SHA=$(printf '%s' "$STACK_RESULT" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(d);process.stdout.write(j.dependencySha||"")}catch{}})' 2>/dev/null)
+    echo "Stacking '$BRANCH_NAME' on unmerged dependency branch '$DEP_BRANCH' (not yet in $DEFAULT_BRANCH) instead of $DEFAULT_BRANCH." >&2
+    FORK_BASE="$STACK_BASE"
+  fi
+
+  git checkout -b "$BRANCH_NAME" "$FORK_BASE" --no-track \
+    || { echo "ERROR: Could not create '$BRANCH_NAME' from $FORK_BASE (#2916)." >&2; exit 1; }
+
+  [ -n "$STACK_BASE" ] && gsd_run query worktree record-stack-base "$phase_number" "$DEP_BRANCH" "$DEP_SHA" >/dev/null 2>&1
 fi
 ```
 

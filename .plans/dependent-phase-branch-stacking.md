@@ -116,3 +116,32 @@ took in Anti-Budget's own recovery-branch investigation this session).
    already-reported gap, not part of this plan) — does adding dependency-branch resolution here
    make it more or less pressing to wire preflight into those too, since both would now share the
    same "find the dependency's branch" primitive?
+
+## Resolution (implemented 2026-09-04)
+
+1. **New sibling module** (`src/branch-stacking.cts`), not folded into `phase-preflight.cts` —
+   keeps that module's own stated scope ("does phase N exist elsewhere," not "what should I fork
+   from") intact. It imports `findMatchingWorktrees`/`normalizePhaseNumber` from the compiled
+   `phase-preflight.cjs` rather than duplicating them.
+2. **Tracked JSON file**, `.planning/.stack-base.json`, one record per checkout — not
+   `*-CONTEXT.md` frontmatter (that's a planning doc, not obviously a home for git-branch
+   metadata) and not piggybacked on `status-stack-sync.json` (that file's shape is itself still
+   just proposed, not implemented — coupling to it now would mean changing both together later).
+   `readDependencyPhaseNumbers` reads `ROADMAP.md`'s `**Depends on:**` field directly via
+   `getRoadmapPhaseInternal` (not injected — matches that function's use elsewhere in the
+   codebase as a plain `require()`, not a DI seam), so `resolveStackBase` stays self-sufficient
+   like `checkPhaseWorktree` — callers only need to pass a phase number and default branch.
+3. **Left open** — not addressed by this pass, tracked as a separate follow-up.
+
+Wired into `execute-phase.md`'s `handle_branching` step: `gsd_run query worktree stack-base
+"$phase_number" "$DEFAULT_BRANCH"` resolves the fork point before the `git checkout -b` that
+creates a new phase branch (existing-branch reuse path is untouched); `gsd_run query worktree
+record-stack-base` records the choice immediately after. Added `tests/branch-stacking.test.cjs`
+(29 tests, dependency-injected `execGit` + real-tempdir `ROADMAP.md` fixtures, matching
+`phase-preflight.test.cjs`'s and `roadmap-parser.test.cjs`'s own conventions respectively).
+Verified against Anti-Budget's real Phase 9.2 → 9.1 case: correctly resolves
+`origin/v1.1/phase-09.1-wizard-shell-progress-persistence-and-resume` as the stack base.
+
+The reconciliation check ("stack base has since merged, refresh `develop` in now") described in
+"What this does not fix" is still not built — `readStackBase` exists so it can be, without
+re-deriving the relationship later.

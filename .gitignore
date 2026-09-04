@@ -194,6 +194,7 @@ build/
 /gsd-core/bin/lib/worktree-base-ref.cjs
 /gsd-core/bin/lib/worktree-safety.cjs
 /gsd-core/bin/lib/phase-preflight.cjs
+/gsd-core/bin/lib/branch-stacking.cjs
 /gsd-core/bin/lib/planning-workspace.cjs
 /gsd-core/bin/lib/planning-scope.cjs
 /gsd-core/bin/lib/planning-snapshot.cjs
