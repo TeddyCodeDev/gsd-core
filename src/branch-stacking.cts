@@ -35,8 +35,26 @@ import { findMatchingWorktrees, normalizePhaseNumber } from './phase-preflight.c
 import roadmapParser = require('./roadmap-parser.cjs');
 import phaseId = require('./phase-id.cjs');
 
-const { PHASE_NUMBER_TOKEN_SOURCE } = phaseId;
+const { PHASE_NUMBER_TOKEN_SOURCE, escapeRegex } = phaseId;
 const { getRoadmapPhaseInternal } = roadmapParser;
+
+/**
+ * Stricter than `phase-preflight`'s `matchesPhaseBranch`: also rejects a
+ * decimal continuation, so a query for phase "09" does not match a
+ * "v1.1/phase-09.1-..." sub-phase branch. `matchesPhaseBranch`'s looser
+ * boundary is correct for its own "does phase N have existing work anywhere"
+ * purpose (always asked with a fully-qualified phase id already); dependency
+ * resolution needs the opposite guarantee — phase 09.1's own branch must
+ * never satisfy a dependency query for its parent phase "09", or a whole-
+ * number dependency that already merged (no branch of its own left) reads as
+ * "ambiguous" instead of "satisfied" the moment any of its sub-phases still
+ * has an open branch.
+ */
+function isExactPhaseBranch(branchName: string, phaseNumber: string): boolean {
+  if (!branchName || !phaseNumber) return false;
+  const pattern = new RegExp(`phase-${escapeRegex(phaseNumber)}(?:[^0-9.]|$)`);
+  return pattern.test(branchName);
+}
 
 type ExecGitFn = typeof execGitSeam;
 
@@ -150,7 +168,9 @@ export function resolveStackBase(
 
   for (const depPhase of dependencyPhases) {
     const worktrees = findMatchingWorktrees(cwd, depPhase, deps);
-    const branchNames = [...new Set(worktrees.map((w) => w.branch))];
+    const branchNames = [...new Set(
+      worktrees.map((w) => w.branch).filter((branch) => isExactPhaseBranch(branch, depPhase)),
+    )];
     for (const branch of branchNames) {
       if (!isBranchPushedToOrigin(cwd, branch, deps)) continue;
       if (isBranchMergedIntoDefault(cwd, branch, defaultBranch, deps)) continue;

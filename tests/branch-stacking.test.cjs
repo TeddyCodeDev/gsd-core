@@ -281,6 +281,44 @@ describe('resolveStackBase', () => {
     assert.strictEqual(result.reason, 'multiple_unmerged_dependencies_ambiguous');
   });
 
+  // Regression: a whole-number dependency ("09") that has already merged (no
+  // branch of its own left) must not be confused for "ambiguous" just because
+  // several of its sub-phases ("09.1", "09.2", ...) still have open branches —
+  // a sub-phase branch is never that whole-number phase's own branch.
+  test('a merged whole-number dependency is not confused with its still-open sub-phase branches', () => {
+    writeRoadmap(tmpDir, [
+      '### Phase 09.1: Wizard Shell',
+      '**Goal:** g',
+      '**Depends on:** Phase 09',
+    ].join('\n'));
+    const subPhaseWorktrees = [
+      'worktree /repo',
+      'branch refs/heads/develop',
+      '',
+      'worktree /repo/.worktrees/p91',
+      'branch refs/heads/v1.1/phase-09.1-wizard-shell',
+      '',
+      'worktree /repo/.worktrees/p92',
+      'branch refs/heads/v1.1/phase-09.2-mvf-core',
+      '',
+    ].join('\n');
+    const execGit = (args) => {
+      if (args[0] === 'worktree') return { ...PASSTHROUGH, stdout: subPhaseWorktrees };
+      if (args[0] === 'log') return { ...PASSTHROUGH, stdout: '2026-09-04T00:00:00-06:00' };
+      if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return { ...PASSTHROUGH, stdout: tmpDir };
+      // These stubs would prove eligible if the sub-phase branches were
+      // (wrongly) treated as phase 09's own branch — the test only passes if
+      // resolveStackBase never gets far enough to call them for either branch.
+      if (args[0] === 'fetch') return { ...PASSTHROUGH };
+      if (args[0] === 'rev-parse' && args.includes('--verify')) return { ...PASSTHROUGH, exitCode: 0 };
+      if (args[0] === 'merge-base') return { ...PASSTHROUGH, exitCode: 1 };
+      return { ...PASSTHROUGH };
+    };
+    const result = resolveStackBase(tmpDir, '09.1', 'develop', { execGit });
+    assert.strictEqual(result.stackBase, null);
+    assert.strictEqual(result.reason, 'all_dependencies_merged_or_unavailable');
+  });
+
   test('never throws when git fails outright', () => {
     writeRoadmap(tmpDir, [
       '### Phase 9.2: MVF Core',
