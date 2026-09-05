@@ -1,6 +1,6 @@
 <purpose>
 
-Interactive command center for managing a milestone from a single terminal. Shows a dashboard of all phases with visual status, dispatches discuss inline and runs plan/execute inline (backgrounded when dispatch-should-flatten returns false), and loops back to the dashboard after each action. Enables parallel phase work from one terminal.
+Interactive command center for managing a milestone from a single terminal. Shows a dashboard of all phases with visual status, dispatches discuss inline and runs plan/execute inline (backgrounded when dispatch-should-flatten returns false), and loops back to the dashboard after each action. Enables parallel phase work from one terminal. When a recommended phase already has a matching local worktree (single-owner project, not someone else's session), offers to resume it there in place instead of only warning and dropping the recommendation.
 
 </purpose>
 
@@ -182,6 +182,16 @@ as its own warning line — do not silently drop it:
   PR #{matchingPullRequests[0].number}: {matchingPullRequests[0].title} ({matchingPullRequests[0].url})
 ```
 
+**Resume candidates:** the guard's job is telling apart "spawn a duplicate" from "this is already
+mine, still in progress" — it cannot tell those apart on its own, so it always blocks dispatch and
+leaves the decision to the operator. When exactly ONE local worktree matched (`matchingWorktrees.length
+=== 1`), also add `{phase, phase_name, path: matchingWorktrees[0].path, branch:
+matchingWorktrees[0].branch}` to a `resume_candidates` list — a single-owner project (no other
+session/collaborator could plausibly own that worktree) is exactly the case this exists for. A phase
+whose only match is an open PR with no local worktree (`matchingWorktrees.length === 0`), or more than
+one local worktree match, is not a resume candidate — stays a plain warning; never guess which of
+several worktrees to resume.
+
 A phase with `verdict: "safe_to_create"` (or an unresolved check — missing `gh`, no local
 worktree match either way) proceeds into the `Continue` bundle normally; this check is a
 warning system, not a hard dependency; a check that can't run must never block dispatch of
@@ -212,7 +222,21 @@ a phase that genuinely has no existing work.
 
    **Important:** The Continue option must include EVERY action from `recommended_actions` — not just 2. If there are 3 actions, list 3. If there are 5, list 5.
 
-4. Always add:
+5. **If `resume_candidates` is non-empty**, add a second compound option alongside (never merged
+   into) `"Continue"` — resuming existing work is a distinct decision from dispatching new work,
+   and must never happen silently as part of the same click:
+   - Label: `"Resume existing work"`
+   - Below the label, list every candidate:
+     ```
+     Resume existing work:
+       → Phase 9.2 in .worktrees/phase-09.2-mvf-core
+       → Phase 10 in .worktrees/gsd-dashboard-state
+     ```
+   - This always runs inline, one candidate at a time, regardless of `FLATTEN` — see "Resume Phase
+     N In Existing Worktree" in handle_action. It never spawns a background `Agent()`: resuming
+     means continuing *this* worktree's own history, not producing a second, independent one.
+
+6. Always add:
    - `"Refresh dashboard"`
    - `"Exit manager"`
 
@@ -227,6 +251,9 @@ Continue:
   → Execute Phase 32 (background)
   → Plan Phase 34 (background)
   → Discuss Phase 35 (inline)
+
+Resume existing work:
+  → Phase 9.2 in .worktrees/phase-09.2-mvf-core
 ```
 
 **Auto-refresh:** If background agents are running (`is_active` is true for any phase), set a 60-second auto-refresh cycle. After presenting the action menu, if no user input is received within 60 seconds, automatically refresh the dashboard. This interval is configurable via `manager_refresh_interval` in GSD config (default: 60 seconds, set to 0 to disable).
@@ -284,6 +311,57 @@ Skill(skill="gsd-discuss-phase", args="{PHASE_NUM} {manager_flags.discuss}")
 ```
 
 After discuss completes, loop back to dashboard step.
+
+### Resume Phase N In Existing Worktree
+
+The user selected "Resume existing work" for one or more `resume_candidates`. This always runs
+inline and never spawns a background `Agent()` — the whole point is continuing *that* worktree's
+own git history in place, not producing a second, independent one alongside it. There is no `git
+switch` involved: the phase's branch is already checked out there, and git refuses to check the
+same branch out in two places at once — the only way to operate on it is to actually be in that
+worktree's directory.
+
+**On Claude Code:** for each selected candidate, in order:
+
+```
+EnterWorktree(path="{candidate.path}")
+```
+
+Then run the phase exactly as the normal inline execute path does:
+
+```
+Skill(skill="gsd-execute-phase", args="{candidate.phase} {manager_flags.execute}")
+```
+
+Then, regardless of outcome:
+
+```
+ExitWorktree(action="keep")
+```
+
+`"keep"` is mandatory here — this worktree was not created by this workflow and is never this
+workflow's to delete. Display before each candidate:
+
+```
+◆ Resuming Phase {candidate.phase}: {candidate.phase_name} in {candidate.path}... (runs inline in
+  that worktree — the dashboard resumes when it returns; expected, not a freeze)
+```
+
+**On every other runtime:** `EnterWorktree`/`ExitWorktree` are Claude-Code-specific — there is no
+cross-runtime equivalent for switching an orchestrator session's own working directory into an
+existing worktree. Do not attempt a workaround (a background `Agent()` here would create a second,
+divergent worktree instead of continuing this one, which is the opposite of what was asked; a bare
+`cd` from workflow markdown does not persist across tool calls). Print, per candidate, exactly what
+to run and stop — do not attempt it automatically:
+
+```
+Resuming Phase {candidate.phase} isn't automated on this runtime. Run it yourself:
+  cd {candidate.path}
+  {command from the phase's own execute recommendation, e.g. /gsd-execute-phase {candidate.phase}}
+```
+
+After all selected candidates are handled (resumed or, on unsupported runtimes, printed), loop back
+to dashboard step.
 
 ### Plan Phase N
 
